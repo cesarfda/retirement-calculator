@@ -57,27 +57,18 @@ st.set_page_config(page_title="Retirement Calculator", layout="wide")
 st.title("Retirement Calculator with Monte Carlo Simulation")
 
 
-def parse_currency(value: str, fallback: float) -> float:
-    """Parse a currency string to float."""
-    cleaned = value.replace("$", "").replace(",", "").strip()
-    if not cleaned:
-        return fallback
-    try:
-        return float(cleaned)
-    except ValueError:
-        return fallback
-
-
 def currency_input(label: str, value: float, key: str, help_text: str | None = None) -> float:
     """Create a currency input field."""
-    raw_value = st.text_input(
+    raw_value = st.number_input(
         label,
         key=key,
         help=help_text,
-        value=st.session_state.get(key, format_currency(value)),
+        min_value=0.0,
+        value=st.session_state.get(key, value),
+        step=100.0,
+        format="$%.0f",
     )
-    parsed_value = parse_currency(raw_value, value)
-    return parsed_value
+    return float(raw_value)
 
 
 # =============================================================================
@@ -102,19 +93,19 @@ with st.sidebar:
         "401k balance",
         value=190_000.0,
         key="balance_401k",
-        help_text="Enter a dollar amount (commas and $ optional).",
+        help_text="Enter a dollar amount.",
     )
     balance_roth = currency_input(
         "Roth IRA balance",
         value=40_000.0,
         key="balance_roth",
-        help_text="Enter a dollar amount (commas and $ optional).",
+        help_text="Enter a dollar amount.",
     )
     balance_taxable = currency_input(
         "After-tax balance",
         value=250_000.0,
         key="balance_taxable",
-        help_text="Enter a dollar amount (commas and $ optional).",
+        help_text="Enter a dollar amount.",
     )
 
     st.header("Monthly contributions")
