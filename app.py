@@ -32,13 +32,13 @@ def parse_currency(value: str, fallback: float) -> float:
 
 
 def currency_input(label: str, value: float, key: str, help_text: str | None = None) -> float:
-    if key not in st.session_state:
-        st.session_state[key] = format_currency(value)
-    raw_value = st.text_input(label, key=key, help=help_text)
+    raw_value = st.text_input(
+        label,
+        key=key,
+        help=help_text,
+        value=st.session_state.get(key, format_currency(value)),
+    )
     parsed_value = parse_currency(raw_value, value)
-    formatted_value = format_currency(parsed_value)
-    if raw_value != formatted_value:
-        st.session_state[key] = formatted_value
     return parsed_value
 
 with st.sidebar:
@@ -393,9 +393,9 @@ else:
 
 tabs = st.tabs(["Overview", "Distribution", "Accounts", "Assumptions"])
 with tabs[0]:
-    st.plotly_chart(fan_chart, use_container_width=True)
+    st.plotly_chart(fan_chart, width="stretch")
     if show_success_chart:
-        st.plotly_chart(success_chart, use_container_width=True)
+        st.plotly_chart(success_chart, width="stretch")
     allocation_chart = go.Figure(
         data=[
             go.Pie(
@@ -406,13 +406,13 @@ with tabs[0]:
         ]
     )
     allocation_chart.update_layout(title="Asset Allocation", legend_title="Assets")
-    st.plotly_chart(allocation_chart, use_container_width=True)
+    st.plotly_chart(allocation_chart, width="stretch")
 
 with tabs[1]:
-    st.plotly_chart(histogram, use_container_width=True)
+    st.plotly_chart(histogram, width="stretch")
 
 with tabs[2]:
-    st.plotly_chart(account_chart, use_container_width=True)
+    st.plotly_chart(account_chart, width="stretch")
 
 with tabs[3]:
     st.subheader("Scenario settings")
