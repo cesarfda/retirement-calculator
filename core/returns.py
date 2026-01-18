@@ -70,6 +70,8 @@ def get_monthly_returns(
         returns = _fetch_yfinance_returns(tickers)
     except Exception:
         return load_embedded_returns(embedded_path)
+    if returns.empty:
+        return load_embedded_returns(embedded_path)
 
     payload = {}
     for ticker in returns.columns:
@@ -108,6 +110,9 @@ def sample_returns(
     scenario = scenario.lower()
     returns_matrix = returns.copy()
 
+    if scenario in {"recession", "lost decade"}:
+        returns_matrix = _filter_historical_scenario(returns_matrix, scenario)
+
     if scenario in {"bull", "bear"}:
         score = returns_matrix.mean(axis=1)
         median = score.median()
@@ -118,13 +123,20 @@ def sample_returns(
 
     values = returns_matrix.values
     n_available = values.shape[0]
-    blocks_per_path = int(np.ceil(n_months / block_size))
+    if n_available == 0:
+        n_assets = values.shape[1] if values.ndim > 1 else 0
+        return np.zeros((n_simulations, n_months, n_assets))
 
-    indices = np.random.randint(0, n_available - block_size + 1, size=(n_simulations, blocks_per_path))
-    sampled = np.zeros((n_simulations, blocks_per_path * block_size, values.shape[1]))
+    effective_block_size = min(block_size, n_available)
+    blocks_per_path = int(np.ceil(n_months / effective_block_size))
+
+    indices = np.random.randint(
+        0, n_available - effective_block_size + 1, size=(n_simulations, blocks_per_path)
+    )
+    sampled = np.zeros((n_simulations, blocks_per_path * effective_block_size, values.shape[1]))
 
     for sim in range(n_simulations):
-        blocks = [values[start : start + block_size] for start in indices[sim]]
+        blocks = [values[start : start + effective_block_size] for start in indices[sim]]
         sampled[sim] = np.concatenate(blocks, axis=0)
 
     sampled = sampled[:, :n_months, :]
@@ -133,3 +145,19 @@ def sample_returns(
         sampled = sampled * volatility_multiplier
 
     return sampled
+
+
+def _filter_historical_scenario(returns: pd.DataFrame, scenario: str) -> pd.DataFrame:
+    scenario = scenario.lower()
+    ranges = {
+        "recession": ("2007-01-01", "2009-12-31"),
+        "lost decade": ("2000-01-01", "2009-12-31"),
+    }
+    if scenario not in ranges:
+        return returns
+
+    start, end = ranges[scenario]
+    filtered = returns.loc[start:end]
+    if filtered.shape[0] < 12:
+        return returns
+    return filtered

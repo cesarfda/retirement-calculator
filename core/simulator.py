@@ -37,6 +37,8 @@ def run_simulation(
     scenario: str,
     asset_returns: np.ndarray,
     retirement_months: int | None = None,
+    soft_retirement_months: int | None = None,
+    soft_contribution_factor: float = 1.0,
     withdrawal_rate: float = 0.04,
 ) -> SimulationResult:
     months = years * 12
@@ -58,10 +60,16 @@ def run_simulation(
         balances[:, month, :] = balances[:, month, :] * (1 + returns[:, month][:, None])
 
         if retirement_months is None or month < retirement_months:
-            employer_match = apply_employer_match(monthly_401k, match_rate, match_cap)
-            balances[:, month, 0] += monthly_401k + employer_match
-            balances[:, month, 1] += monthly_roth
-            balances[:, month, 2] += monthly_taxable
+            is_soft_retired = soft_retirement_months is not None and month >= soft_retirement_months
+            contribution_multiplier = soft_contribution_factor if is_soft_retired else 1.0
+            effective_401k = monthly_401k * contribution_multiplier
+            effective_roth = monthly_roth * contribution_multiplier
+            effective_taxable = monthly_taxable * contribution_multiplier
+
+            employer_match = apply_employer_match(effective_401k, match_rate, match_cap)
+            balances[:, month, 0] += effective_401k + employer_match
+            balances[:, month, 1] += effective_roth
+            balances[:, month, 2] += effective_taxable
         else:
             total_balance = balances[:, month, :].sum(axis=1)
             withdrawal = (withdrawal_rate / 12) * total_balance
