@@ -20,6 +20,27 @@ st.set_page_config(page_title="Retirement Calculator", layout="wide")
 
 st.title("Retirement Calculator with Monte Carlo Simulation")
 
+
+def parse_currency(value: str, fallback: float) -> float:
+    cleaned = value.replace("$", "").replace(",", "").strip()
+    if not cleaned:
+        return fallback
+    try:
+        return float(cleaned)
+    except ValueError:
+        return fallback
+
+
+def currency_input(label: str, value: float, key: str, help_text: str | None = None) -> float:
+    if key not in st.session_state:
+        st.session_state[key] = format_currency(value)
+    raw_value = st.text_input(label, key=key, help=help_text)
+    parsed_value = parse_currency(raw_value, value)
+    formatted_value = format_currency(parsed_value)
+    if raw_value != formatted_value:
+        st.session_state[key] = formatted_value
+    return parsed_value
+
 with st.sidebar:
     st.header("Profile")
     current_age = st.number_input("Current age", min_value=18, max_value=80, value=35)
@@ -32,14 +53,44 @@ with st.sidebar:
     )
 
     st.header("Current balances")
-    balance_401k = st.number_input("401k balance", value=150_000.0, step=5_000.0)
-    balance_roth = st.number_input("Roth IRA balance", value=40_000.0, step=2_500.0)
-    balance_taxable = st.number_input("After-tax balance", value=25_000.0, step=2_500.0)
+    balance_401k = currency_input(
+        "401k balance",
+        value=150_000.0,
+        key="balance_401k",
+        help_text="Enter a dollar amount (commas and $ optional).",
+    )
+    balance_roth = currency_input(
+        "Roth IRA balance",
+        value=40_000.0,
+        key="balance_roth",
+        help_text="Enter a dollar amount (commas and $ optional).",
+    )
+    balance_taxable = currency_input(
+        "After-tax balance",
+        value=25_000.0,
+        key="balance_taxable",
+        help_text="Enter a dollar amount (commas and $ optional).",
+    )
 
     st.header("Monthly contributions")
-    contrib_401k = st.number_input("401k contribution", value=900.0, step=50.0)
-    contrib_roth = st.number_input("Roth IRA contribution", value=400.0, step=25.0)
-    contrib_taxable = st.number_input("After-tax contribution", value=300.0, step=25.0)
+    contrib_401k = currency_input(
+        "401k contribution",
+        value=900.0,
+        key="contrib_401k",
+        help_text="Monthly contribution in dollars.",
+    )
+    contrib_roth = currency_input(
+        "Roth IRA contribution",
+        value=400.0,
+        key="contrib_roth",
+        help_text="Monthly contribution in dollars.",
+    )
+    contrib_taxable = currency_input(
+        "After-tax contribution",
+        value=300.0,
+        key="contrib_taxable",
+        help_text="Monthly contribution in dollars.",
+    )
     soft_contribution_factor = st.slider(
         "Contributions after soft retirement",
         min_value=0.0,
@@ -51,7 +102,12 @@ with st.sidebar:
 
     st.header("Employer match")
     match_rate = st.slider("Match rate", min_value=0.0, max_value=1.0, value=0.5, step=0.05)
-    match_cap = st.number_input("Match cap (monthly)", value=500.0, step=25.0)
+    match_cap = currency_input(
+        "Match cap (monthly)",
+        value=500.0,
+        key="match_cap",
+        help_text="Monthly employer match cap in dollars.",
+    )
 
     st.header("Asset allocation")
     us_alloc = st.slider("US (VTI)", min_value=0, max_value=100, value=60)
@@ -131,7 +187,8 @@ result = run_simulation(
 
 months = np.arange(0, years * 12 + 1)
 display_mask = months <= display_months
-display_months_axis = months[display_mask]
+ages = current_age + months / 12
+display_age_axis = ages[display_mask]
 
 if adjust_for_inflation and inflation_rate > 0:
     monthly_inflation = annual_to_monthly_rate(inflation_rate)
@@ -167,7 +224,7 @@ for label in selected_percentiles:
     style = percentile_styles[label]
     fan_chart.add_trace(
         go.Scatter(
-            x=display_months_axis,
+            x=display_age_axis,
             y=percentile_series[percentile_key][display_mask],
             line=dict(
                 color=style["color"],
@@ -181,14 +238,14 @@ if show_percentile_bands:
     fan_chart.add_traces(
         [
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=percentile_series["p95"][display_mask],
                 line=dict(color="rgba(0,0,0,0)"),
                 showlegend=False,
                 hoverinfo="skip",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=percentile_series["p75"][display_mask],
                 fill="tonexty",
                 fillcolor="rgba(0, 123, 255, 0.15)",
@@ -196,7 +253,7 @@ if show_percentile_bands:
                 name="75-95%",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=percentile_series["p25"][display_mask],
                 fill="tonexty",
                 fillcolor="rgba(0, 123, 255, 0.25)",
@@ -204,7 +261,7 @@ if show_percentile_bands:
                 name="25-75%",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=percentile_series["p5"][display_mask],
                 fill="tonexty",
                 fillcolor="rgba(0, 123, 255, 0.35)",
@@ -215,7 +272,7 @@ if show_percentile_bands:
     )
 if show_retirement_marker and retirement_months <= display_months:
     fan_chart.add_vline(
-        x=retirement_months,
+        x=current_age + retirement_months / 12,
         line_dash="dot",
         line_color="gray",
         annotation_text="Retirement",
@@ -227,7 +284,7 @@ if (
     and soft_retirement_months < retirement_months
 ):
     fan_chart.add_vline(
-        x=soft_retirement_months,
+        x=current_age + soft_retirement_months / 12,
         line_dash="dash",
         line_color="#6f42c1",
         annotation_text="Soft retirement",
@@ -235,9 +292,10 @@ if (
     )
 fan_chart.update_layout(
     title="Portfolio Value Percentiles",
-    xaxis_title="Months",
+    xaxis_title="Age",
     yaxis_title="Balance",
     hovermode="x unified",
+    xaxis=dict(dtick=5, tickformat=".1f"),
 )
 
 ending_balances = result.ending_balances / inflation_factors[-1]
@@ -253,19 +311,19 @@ if show_account_area:
     account_chart.add_traces(
         [
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=account_paths[:, 0][display_mask],
                 stackgroup="one",
                 name="401k",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=account_paths[:, 1][display_mask],
                 stackgroup="one",
                 name="Roth IRA",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=account_paths[:, 2][display_mask],
                 stackgroup="one",
                 name="After-tax",
@@ -276,30 +334,35 @@ else:
     account_chart.add_traces(
         [
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=account_paths[:, 0][display_mask],
                 name="401k",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=account_paths[:, 1][display_mask],
                 name="Roth IRA",
             ),
             go.Scatter(
-                x=display_months_axis,
+                x=display_age_axis,
                 y=account_paths[:, 2][display_mask],
                 name="After-tax",
             ),
         ]
     )
-account_chart.update_layout(title="Account Growth (Average)", xaxis_title="Months", yaxis_title="Balance")
+account_chart.update_layout(
+    title="Account Growth (Average)",
+    xaxis_title="Age",
+    yaxis_title="Balance",
+    xaxis=dict(dtick=5, tickformat=".1f"),
+)
 
 total_paths = result.account_paths.sum(axis=2) / inflation_factors[None, :]
 success_over_time = (total_paths > 0).mean(axis=0)
 success_chart = go.Figure(
     data=[
         go.Scatter(
-            x=display_months_axis,
+            x=display_age_axis,
             y=success_over_time[display_mask] * 100,
             line=dict(color="#198754", width=3),
             name="Success rate",
@@ -308,9 +371,10 @@ success_chart = go.Figure(
 )
 success_chart.update_layout(
     title="Probability of Success Over Time",
-    xaxis_title="Months",
+    xaxis_title="Age",
     yaxis_title="Success Rate (%)",
     yaxis_range=[0, 100],
+    xaxis=dict(dtick=5, tickformat=".1f"),
 )
 
 summary_cols = st.columns(4)
