@@ -125,8 +125,8 @@ def validate_simulation_params(
 
     if years < 1:
         result.add_error("years", "Must simulate at least 1 year")
-    if years > 60:
-        result.add_error("years", "Cannot simulate more than 60 years")
+    if years > 71:
+        result.add_error("years", "Cannot simulate more than 71 years")
 
     if n_simulations < 10:
         result.add_error("n_simulations", "Must run at least 10 simulations")
