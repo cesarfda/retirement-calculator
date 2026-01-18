@@ -66,7 +66,7 @@ def currency_input(label: str, value: float, key: str, help_text: str | None = N
         min_value=0.0,
         value=st.session_state.get(key, value),
         step=100.0,
-        format="$%.0f",
+        format="%.0f",
     )
     return float(raw_value)
 
