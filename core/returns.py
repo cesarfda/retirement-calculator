@@ -264,7 +264,21 @@ def get_historical_summary(returns: pd.DataFrame) -> dict:
     end_date = returns.index.max()
     n_months = len(returns)
 
-    # Calculate annualized returns and volatility
+    # Calculate annualized returns and volatility per ticker
+    ticker_stats = {}
+    for ticker in returns.columns:
+        mean_monthly = returns[ticker].mean()
+        std_monthly = returns[ticker].std()
+        # Annualize using compound returns
+        annualized_return = (1 + mean_monthly) ** 12 - 1
+        annualized_vol = std_monthly * np.sqrt(12)
+        ticker_stats[ticker] = {
+            "annualized_return": annualized_return,
+            "annualized_volatility": annualized_vol,
+            "mean_monthly": mean_monthly,
+        }
+
+    # Overall portfolio stats (equal weighted for summary)
     mean_monthly = returns.mean().mean()
     std_monthly = returns.std().mean()
     annualized_return = (1 + mean_monthly) ** 12 - 1
@@ -285,6 +299,7 @@ def get_historical_summary(returns: pd.DataFrame) -> dict:
         "n_years": n_months / 12,
         "annualized_return": annualized_return,
         "annualized_volatility": annualized_vol,
+        "ticker_stats": ticker_stats,
         "worst_drawdown": worst_drawdown,
         "worst_drawdown_date": worst_drawdown_date.strftime("%Y-%m-%d") if hasattr(worst_drawdown_date, 'strftime') else str(worst_drawdown_date),
         "includes_gfc": start_date.year <= 2007 and end_date.year >= 2009,

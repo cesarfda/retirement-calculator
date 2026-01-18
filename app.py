@@ -40,7 +40,17 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data/cache")
 EMBEDDED_PATH = Path("data/historical_returns.json")
-TICKERS = ["VTI", "VXUS", "SGOV"]
+
+# Use longer-history proxies for better simulation accuracy:
+# - SPY: S&P 500 (1993) - proxy for US total market (VTI inception 2001)
+# - EFA: Developed Markets ex-US (2001) - proxy for international (VXUS inception 2011)
+# - SHY: 1-3 Year Treasury (2002) - proxy for short-term bonds (SGOV inception 2020)
+TICKERS = ["SPY", "EFA", "SHY"]
+TICKER_DISPLAY_NAMES = {
+    "SPY": "US Stocks (SPY→VTI)",
+    "EFA": "International (EFA→VXUS)",
+    "SHY": "Treasuries (SHY→SGOV)",
+}
 
 st.set_page_config(page_title="Retirement Calculator", layout="wide")
 
@@ -205,9 +215,9 @@ with st.sidebar:
         sgov_alloc = 100 - us_alloc - vxus_alloc
     else:
         glide_path = None
-        us_alloc = st.slider("US (VTI)", min_value=0, max_value=100, value=30)
-        vxus_alloc = st.slider("International (VXUS)", min_value=0, max_value=100, value=65)
-        sgov_alloc = st.slider("Treasuries (SGOV)", min_value=0, max_value=100, value=5)
+        us_alloc = st.slider("US Stocks (SPY)", min_value=0, max_value=100, value=30)
+        vxus_alloc = st.slider("International (EFA)", min_value=0, max_value=100, value=65)
+        sgov_alloc = st.slider("Treasuries (SHY)", min_value=0, max_value=100, value=5)
 
     st.header("Simulation")
     years = st.slider("Years to project", min_value=5, max_value=71, value=70)
@@ -495,6 +505,15 @@ with st.sidebar.expander("Data Status", expanded=False):
             included_events.append("COVID 2020")
         if included_events:
             st.caption(f"**Includes**: {', '.join(included_events)}")
+
+        # Show expected returns per ticker
+        if "ticker_stats" in hist_summary:
+            st.caption("**Expected annual returns**:")
+            for ticker, stats in hist_summary["ticker_stats"].items():
+                display_name = TICKER_DISPLAY_NAMES.get(ticker, ticker)
+                ann_return = stats["annualized_return"]
+                ann_vol = stats["annualized_volatility"]
+                st.caption(f"  {display_name}: {ann_return:.1%} (±{ann_vol:.1%})")
 
     if data_warning:
         st.warning("Data warnings:")
@@ -1005,6 +1024,22 @@ with tabs[4]:
             "Guardrails": "Enabled" if use_guardrails else "Disabled",
         }
     )
+
+    # Show expected returns per ticker in assumptions
+    if "error" not in historical_summary and "ticker_stats" in historical_summary:
+        st.subheader("Expected Returns (Historical)")
+        ticker_returns_data = {}
+        for ticker, stats in historical_summary["ticker_stats"].items():
+            display_name = TICKER_DISPLAY_NAMES.get(ticker, ticker)
+            ticker_returns_data[display_name] = {
+                "Annual return": f"{stats['annualized_return']:.1%}",
+                "Volatility": f"{stats['annualized_volatility']:.1%}",
+            }
+        st.write(ticker_returns_data)
+        st.caption(
+            "Returns are based on historical data and may not reflect future performance. "
+            "Volatility shown as annualized standard deviation."
+        )
 
     # Show stress test details if enabled
     if stress_test_results:
