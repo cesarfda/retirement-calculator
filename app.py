@@ -562,7 +562,6 @@ with st.sidebar:
     show_percentile_bands = st.toggle("Show percentile bands", value=True)
     show_account_area = st.toggle("Show account breakdown", value=True)
     show_success_chart = st.toggle("Show success over time", value=True)
-    show_risk_metrics = st.toggle("Show detailed risk metrics", value=True)
 
 # =============================================================================
 # VALIDATION
@@ -1058,92 +1057,6 @@ if retirement_months < len(percentile_series["p50"]):
 else:
     summary_cols[3].metric("Median at retirement", "N/A")
 
-# Withdrawal range at retirement (today's dollars)
-if retirement_months < len(result.total_paths[0]):
-    retirement_balances = result.total_paths[:, retirement_months] / inflation_factors[
-        retirement_months
-    ]
-    annual_withdrawals = retirement_balances * withdrawal_rate
-    withdrawal_p5 = np.percentile(annual_withdrawals, 5)
-    withdrawal_p50 = np.percentile(annual_withdrawals, 50)
-    withdrawal_p95 = np.percentile(annual_withdrawals, 95)
-    withdrawal_cols = st.columns(3)
-    withdrawal_cols[0].metric(
-        "Annual withdrawal (5th pct)",
-        format_currency(withdrawal_p5),
-        help="Estimated annual withdrawal at retirement in today's dollars (5th percentile).",
-    )
-    withdrawal_cols[1].metric(
-        "Annual withdrawal (median)",
-        format_currency(withdrawal_p50),
-        help="Estimated annual withdrawal at retirement in today's dollars (median).",
-    )
-    withdrawal_cols[2].metric(
-        "Annual withdrawal (95th pct)",
-        format_currency(withdrawal_p95),
-        help="Estimated annual withdrawal at retirement in today's dollars (95th percentile).",
-    )
-else:
-    st.metric("Annual withdrawal at retirement", "N/A")
-
-# Risk metrics - second row (if enabled)
-if show_risk_metrics:
-    risk_cols = st.columns(4)
-    risk_cols[0].metric(
-        "Max Drawdown (median)",
-        f"{risk_metrics.max_drawdown_median * 100:.1f}%",
-        help="Median maximum peak-to-trough decline across simulations.",
-    )
-    risk_cols[1].metric(
-        "Max Drawdown (worst 5%)",
-        f"{risk_metrics.max_drawdown_worst * 100:.1f}%",
-        help="95th percentile of maximum drawdowns (worst case scenarios).",
-    )
-    risk_cols[2].metric(
-        "Years of income remaining",
-        f"{risk_metrics.median_years_of_income:.1f}",
-        help="Median ending balance divided by annual withdrawal amount.",
-    )
-    if risk_metrics.perfect_withdrawal_rate > 0:
-        risk_cols[3].metric(
-            "Safe withdrawal rate (est.)",
-            f"{risk_metrics.perfect_withdrawal_rate * 100:.2f}%",
-            help="Estimated highest withdrawal rate with 95% success.",
-        )
-    else:
-        risk_cols[3].metric("Safe withdrawal rate", "N/A")
-
-    # Enhanced metrics - third row
-    enhanced_cols = st.columns(4)
-    enhanced_cols[0].metric(
-        "CVaR 95%",
-        format_currency(risk_metrics.cvar_95 / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.cvar_95),
-        help="Expected Shortfall: Average ending balance in worst 5% of scenarios.",
-    )
-    enhanced_cols[1].metric(
-        "CVaR 99%",
-        format_currency(risk_metrics.cvar_99 / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.cvar_99),
-        help="Expected Shortfall: Average ending balance in worst 1% of scenarios.",
-    )
-    if risk_metrics.legacy_metrics:
-        enhanced_cols[2].metric(
-            "P(Leave $500k+)",
-            f"{risk_metrics.legacy_metrics.prob_leave_500k * 100:.0f}%",
-            help="Probability of leaving at least $500k to heirs.",
-        )
-        enhanced_cols[3].metric(
-            "Expected Legacy",
-            format_currency(risk_metrics.legacy_metrics.expected_legacy / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.legacy_metrics.expected_legacy),
-            help="Expected (average) ending balance across successful simulations.",
-        )
-
-    # Spending flexibility info
-    if risk_metrics.spending_flexibility and risk_metrics.spending_flexibility.improvement > 0:
-        st.caption(
-            f"**Spending flexibility bonus:** If you can cut spending by 10% during downturns, "
-            f"success rate could improve by ~{risk_metrics.spending_flexibility.improvement * 100:.1f} percentage points."
-        )
-
 # Strategy indicators
 active_strategies = []
 if use_glide_path:
@@ -1179,9 +1092,9 @@ if stress_test_results:
 tabs = st.tabs(["Overview", "Distribution", "Accounts", "Risk Analysis", "Assumptions"])
 
 with tabs[0]:
-    st.plotly_chart(fan_chart, use_container_width=True)
+    st.plotly_chart(fan_chart, width="stretch")
     if show_success_chart:
-        st.plotly_chart(success_chart, use_container_width=True)
+        st.plotly_chart(success_chart, width="stretch")
     allocation_chart = go.Figure(
         data=[
             go.Pie(
@@ -1195,17 +1108,106 @@ with tabs[0]:
         title="Asset Allocation" + (" (Starting)" if use_glide_path else ""),
         legend_title="Assets",
     )
-    st.plotly_chart(allocation_chart, use_container_width=True)
+    st.plotly_chart(allocation_chart, width="stretch")
 
 with tabs[1]:
-    st.plotly_chart(histogram, use_container_width=True)
+    st.plotly_chart(histogram, width="stretch")
 
 with tabs[2]:
-    st.plotly_chart(account_chart, use_container_width=True)
+    st.plotly_chart(account_chart, width="stretch")
 
 with tabs[3]:
     st.subheader("Risk Analysis")
-    st.plotly_chart(ruin_chart, use_container_width=True)
+
+    # Key risk metrics
+    risk_cols = st.columns(4)
+    risk_cols[0].metric(
+        "Max Drawdown (median)",
+        f"{risk_metrics.max_drawdown_median * 100:.1f}%",
+        help="Median maximum peak-to-trough decline across simulations.",
+    )
+    risk_cols[1].metric(
+        "Max Drawdown (worst 5%)",
+        f"{risk_metrics.max_drawdown_worst * 100:.1f}%",
+        help="95th percentile of maximum drawdowns (worst case scenarios).",
+    )
+    risk_cols[2].metric(
+        "Years of income remaining",
+        f"{risk_metrics.median_years_of_income:.1f}",
+        help="Median ending balance divided by annual withdrawal amount.",
+    )
+    if risk_metrics.perfect_withdrawal_rate > 0:
+        risk_cols[3].metric(
+            "Safe withdrawal rate (est.)",
+            f"{risk_metrics.perfect_withdrawal_rate * 100:.2f}%",
+            help="Estimated highest withdrawal rate with 95% success.",
+        )
+    else:
+        risk_cols[3].metric("Safe withdrawal rate", "N/A")
+
+    # Enhanced metrics row
+    enhanced_cols = st.columns(4)
+    enhanced_cols[0].metric(
+        "CVaR 95%",
+        format_currency(risk_metrics.cvar_95 / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.cvar_95),
+        help="Expected Shortfall: Average ending balance in worst 5% of scenarios.",
+    )
+    enhanced_cols[1].metric(
+        "CVaR 99%",
+        format_currency(risk_metrics.cvar_99 / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.cvar_99),
+        help="Expected Shortfall: Average ending balance in worst 1% of scenarios.",
+    )
+    if risk_metrics.legacy_metrics:
+        enhanced_cols[2].metric(
+            "P(Leave $500k+)",
+            f"{risk_metrics.legacy_metrics.prob_leave_500k * 100:.0f}%",
+            help="Probability of leaving at least $500k to heirs.",
+        )
+        enhanced_cols[3].metric(
+            "Expected Legacy",
+            format_currency(risk_metrics.legacy_metrics.expected_legacy / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.legacy_metrics.expected_legacy),
+            help="Expected (average) ending balance across successful simulations.",
+        )
+
+    # Spending flexibility info
+    if risk_metrics.spending_flexibility and risk_metrics.spending_flexibility.improvement > 0:
+        st.caption(
+            f"**Spending flexibility bonus:** If you can cut spending by 10% during downturns, "
+            f"success rate could improve by ~{risk_metrics.spending_flexibility.improvement * 100:.1f} percentage points."
+        )
+
+    # Retirement withdrawals section
+    st.subheader("Retirement Withdrawals")
+    if retirement_months < len(result.total_paths[0]):
+        retirement_balances = result.total_paths[:, retirement_months] / inflation_factors[
+            retirement_months
+        ]
+        annual_withdrawals = retirement_balances * withdrawal_rate
+        withdrawal_p5 = np.percentile(annual_withdrawals, 5)
+        withdrawal_p50 = np.percentile(annual_withdrawals, 50)
+        withdrawal_p95 = np.percentile(annual_withdrawals, 95)
+        withdrawal_cols = st.columns(3)
+        withdrawal_cols[0].metric(
+            "Annual withdrawal (5th pct)",
+            format_currency(withdrawal_p5),
+            help="Estimated annual withdrawal at retirement in today's dollars (5th percentile).",
+        )
+        withdrawal_cols[1].metric(
+            "Annual withdrawal (median)",
+            format_currency(withdrawal_p50),
+            help="Estimated annual withdrawal at retirement in today's dollars (median).",
+        )
+        withdrawal_cols[2].metric(
+            "Annual withdrawal (95th pct)",
+            format_currency(withdrawal_p95),
+            help="Estimated annual withdrawal at retirement in today's dollars (95th percentile).",
+        )
+    else:
+        st.metric("Annual withdrawal at retirement", "N/A")
+
+    # Ruin probability chart
+    st.subheader("Ruin Probability")
+    st.plotly_chart(ruin_chart, width="stretch")
 
     col1, col2 = st.columns(2)
     with col1:
