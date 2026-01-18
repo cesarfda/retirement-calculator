@@ -189,47 +189,50 @@ def sample_returns(
     returns: pd.DataFrame,
     n_months: int,
     n_simulations: int,
-    scenario: str,
     block_size: int = 12,
+    scenario: str | None = None,
     volatility_multiplier: float = 1.0,
 ) -> np.ndarray:
     """
     Sample returns using block bootstrap for Monte Carlo simulation.
 
+    Always samples from the FULL historical data to capture the complete
+    distribution of market conditions (crashes, bull markets, recoveries).
+    This naturally includes tail events like 2008 GFC and dot-com crash.
+
+    For stress testing specific scenarios, use the stress_tests module to
+    apply overlays to the sampled returns.
+
     Args:
         returns: Historical returns DataFrame
         n_months: Number of months to simulate
         n_simulations: Number of simulation paths
-        scenario: Market scenario (historical, recession, bull, bear, etc.)
         block_size: Size of blocks for bootstrap (preserves autocorrelation)
-        volatility_multiplier: Multiplier for high volatility scenario
+        scenario: DEPRECATED - ignored, kept for backward compatibility
+        volatility_multiplier: DEPRECATED - use stress tests instead
 
     Returns:
         3D array of shape (n_simulations, n_months, n_assets)
     """
     logger.debug(
-        f"Sampling returns: {n_simulations} sims, {n_months} months, scenario={scenario}"
+        f"Sampling returns: {n_simulations} sims, {n_months} months, block_size={block_size}"
     )
-    scenario = scenario.lower()
-    returns_matrix = returns.copy()
 
-    if scenario in {"recession", "lost decade"}:
-        returns_matrix = _filter_historical_scenario(returns_matrix, scenario)
+    if scenario is not None and scenario.lower() != "historical":
+        logger.warning(
+            f"Scenario '{scenario}' is deprecated. Using full historical data. "
+            "Use stress tests for scenario analysis."
+        )
 
-    if scenario in {"bull", "bear"}:
-        score = returns_matrix.mean(axis=1)
-        median = score.median()
-        if scenario == "bull":
-            returns_matrix = returns_matrix.loc[score >= median]
-        else:
-            returns_matrix = returns_matrix.loc[score < median]
-
-    values = returns_matrix.values
+    # Always use full historical data
+    values = returns.values
     n_available = values.shape[0]
+
     if n_available == 0:
         n_assets = values.shape[1] if values.ndim > 1 else 0
         return np.zeros((n_simulations, n_months, n_assets))
 
+    # Block bootstrap from full history
     effective_block_size = min(block_size, n_available)
     blocks_per_path = int(np.ceil(n_months / effective_block_size))
 
@@ -244,23 +247,47 @@ def sample_returns(
 
     sampled = sampled[:, :n_months, :]
 
-    if scenario == "high volatility":
-        sampled = sampled * volatility_multiplier
-
     return sampled
 
 
-def _filter_historical_scenario(returns: pd.DataFrame, scenario: str) -> pd.DataFrame:
-    scenario = scenario.lower()
-    ranges = {
-        "recession": ("2007-01-01", "2009-12-31"),
-        "lost decade": ("2000-01-01", "2009-12-31"),
-    }
-    if scenario not in ranges:
-        return returns
+def get_historical_summary(returns: pd.DataFrame) -> dict:
+    """
+    Get summary statistics about the historical data being used.
 
-    start, end = ranges[scenario]
-    filtered = returns.loc[start:end]
-    if filtered.shape[0] < 12:
-        return returns
-    return filtered
+    Returns:
+        Dict with date range, notable periods, and statistics
+    """
+    if returns.empty:
+        return {"error": "No data available"}
+
+    start_date = returns.index.min()
+    end_date = returns.index.max()
+    n_months = len(returns)
+
+    # Calculate annualized returns and volatility
+    mean_monthly = returns.mean().mean()
+    std_monthly = returns.std().mean()
+    annualized_return = (1 + mean_monthly) ** 12 - 1
+    annualized_vol = std_monthly * np.sqrt(12)
+
+    # Identify worst drawdown periods
+    total_return = returns.sum(axis=1)
+    cumulative = total_return.cumsum()
+    running_max = cumulative.cummax()
+    drawdown = cumulative - running_max
+    worst_drawdown = drawdown.min()
+    worst_drawdown_date = drawdown.idxmin()
+
+    return {
+        "start_date": start_date.strftime("%Y-%m-%d"),
+        "end_date": end_date.strftime("%Y-%m-%d"),
+        "n_months": n_months,
+        "n_years": n_months / 12,
+        "annualized_return": annualized_return,
+        "annualized_volatility": annualized_vol,
+        "worst_drawdown": worst_drawdown,
+        "worst_drawdown_date": worst_drawdown_date.strftime("%Y-%m-%d") if hasattr(worst_drawdown_date, 'strftime') else str(worst_drawdown_date),
+        "includes_gfc": start_date.year <= 2007 and end_date.year >= 2009,
+        "includes_dotcom": start_date.year <= 2000 and end_date.year >= 2002,
+        "includes_covid": end_date.year >= 2020,
+    }

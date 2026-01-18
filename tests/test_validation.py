@@ -146,8 +146,8 @@ class TestSimulationParamsValidation:
         assert not result.is_valid()
 
     def test_excessive_years(self):
-        """Over 60 years fails."""
-        result = validate_simulation_params(70, 1000, 0.04)
+        """Over 71 years fails."""
+        result = validate_simulation_params(80, 1000, 0.04)
         assert not result.is_valid()
 
     def test_too_few_simulations(self):

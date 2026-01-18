@@ -21,9 +21,14 @@ from core.glide_path import (
     create_default_glide_path,
 )
 from core.portfolio import Allocation, allocation_from_dict
-from core.returns import get_monthly_returns, load_embedded_returns, sample_returns
+from core.returns import get_historical_summary, get_monthly_returns, load_embedded_returns, sample_returns
 from core.risk_metrics import calculate_risk_metrics
 from core.simulator import Guardrails, TaxConfig, run_simulation
+from core.stress_tests import (
+    AVAILABLE_STRESS_TESTS,
+    apply_stress_test,
+    get_stress_test_by_name,
+)
 from core.tax_config import CURRENT_IRS_LIMITS
 from core.validation import validate_all
 from utils.helpers import annual_to_monthly_rate, format_currency
@@ -209,16 +214,36 @@ with st.sidebar:
     n_simulations = st.select_slider(
         "Number of simulations", options=[250, 500, 1000, 2500, 5000], value=1000
     )
-    scenario = st.selectbox(
-        "Market scenario",
-        ["Historical", "Recession", "Lost Decade", "Bull", "Bear", "High Volatility"],
-    )
-    volatility_multiplier = st.slider(
-        "High volatility multiplier", min_value=1.0, max_value=2.0, value=1.3, step=0.1
-    )
     withdrawal_rate = st.slider(
         "Withdrawal rate", min_value=0.02, max_value=0.08, value=0.04, step=0.005
     )
+
+    st.header("Stress Tests")
+    st.caption(
+        "Main simulation uses full historical data (including crashes). "
+        "Stress tests show additional worst-case scenarios for comparison."
+    )
+    run_stress_tests = st.toggle(
+        "Run stress test comparisons",
+        value=False,
+        help="Run additional simulations with specific adverse scenarios overlaid.",
+    )
+
+    selected_stress_tests: list[str] = []
+    if run_stress_tests:
+        stress_test_options = [st.name for st in AVAILABLE_STRESS_TESTS]
+        selected_stress_tests = st.multiselect(
+            "Select stress scenarios",
+            options=stress_test_options,
+            default=["GFC in Year 1", "GFC at Retirement"],
+            help="These scenarios will be shown as additional lines on the chart.",
+        )
+
+        # Show descriptions for selected tests
+        for test_name in selected_stress_tests:
+            test = get_stress_test_by_name(test_name)
+            if test:
+                st.caption(f"**{test.name}**: {test.description}")
 
     st.header("Costs")
     expense_ratio = st.slider(
@@ -456,6 +481,21 @@ with st.sidebar.expander("Data Status", expanded=False):
         st.write("Cache: Not available")
         st.write("Using: Embedded data")
 
+    # Show historical data summary
+    hist_summary = get_historical_summary(returns_df)
+    if "error" not in hist_summary:
+        st.caption(f"**Data range**: {hist_summary['start_date']} to {hist_summary['end_date']}")
+        st.caption(f"**History**: {hist_summary['n_years']:.1f} years ({hist_summary['n_months']} months)")
+        included_events = []
+        if hist_summary.get("includes_gfc"):
+            included_events.append("GFC 2008")
+        if hist_summary.get("includes_dotcom"):
+            included_events.append("Dot-com crash")
+        if hist_summary.get("includes_covid"):
+            included_events.append("COVID 2020")
+        if included_events:
+            st.caption(f"**Includes**: {', '.join(included_events)}")
+
     if data_warning:
         st.warning("Data warnings:")
         for warning in data_warning:
@@ -465,25 +505,69 @@ with st.sidebar.expander("Data Status", expanded=False):
 # SIMULATION
 # =============================================================================
 
+# Get historical data summary
+historical_summary = get_historical_summary(returns_df)
+
+# Sample returns from FULL historical data (includes all market conditions)
 asset_returns = sample_returns(
     returns_df,
     n_months=years * 12,
     n_simulations=n_simulations,
-    scenario=scenario,
     block_size=12,
-    volatility_multiplier=volatility_multiplier,
 )
 
 retirement_months = max((retirement_age - current_age) * 12, 0)
 soft_retirement_months = max((soft_retirement_age - current_age) * 12, 0)
 
+# Run stress test simulations if enabled
+stress_test_results: dict = {}
+if run_stress_tests and selected_stress_tests:
+    for test_name in selected_stress_tests:
+        test = get_stress_test_by_name(test_name)
+        if test:
+            # Apply stress test to a copy of the returns
+            stressed_returns = apply_stress_test(
+                asset_returns,
+                test,
+                retirement_month=retirement_months,
+            )
+            # Run simulation with stressed returns
+            stress_result = run_simulation(
+                initial_balances=balances_dict,
+                monthly_contributions=contributions_dict,
+                allocation=allocation,
+                years=years,
+                n_simulations=n_simulations,
+                scenario="historical",  # Backward compat
+                asset_returns=stressed_returns,
+                retirement_months=retirement_months,
+                soft_retirement_months=soft_retirement_months,
+                soft_contribution_factor=soft_contribution_factor,
+                soft_contribution_factors={
+                    "401k": soft_contribution_factor if continue_401k else 0.0,
+                    "roth": soft_contribution_factor if continue_roth else 0.0,
+                    "taxable": soft_contribution_factor if continue_taxable else 0.0,
+                },
+                withdrawal_rate=withdrawal_rate,
+                expense_ratio=expense_ratio,
+                guardrails=guardrails,
+                glide_path=glide_path,
+                current_age=current_age,
+                tax_config=tax_config,
+            )
+            stress_test_results[test.id] = {
+                "test": test,
+                "result": stress_result,
+            }
+
+# Run main simulation with full historical data
 result = run_simulation(
     initial_balances=balances_dict,
     monthly_contributions=contributions_dict,
     allocation=allocation,
     years=years,
     n_simulations=n_simulations,
-    scenario=scenario,
+    scenario="historical",  # Always use full history
     asset_returns=asset_returns,
     retirement_months=retirement_months,
     soft_retirement_months=soft_retirement_months,
@@ -607,6 +691,28 @@ if show_percentile_bands:
         ]
     )
 
+# Add stress test median lines
+if stress_test_results:
+    for test_id, stress_data in stress_test_results.items():
+        test = stress_data["test"]
+        stress_result = stress_data["result"]
+
+        # Get median (50th percentile) path for stress test
+        stress_median = np.array(stress_result.percentiles.p50) / inflation_factors
+
+        fan_chart.add_trace(
+            go.Scatter(
+                x=display_age_axis,
+                y=stress_median[display_mask],
+                line=dict(
+                    color=test.color,
+                    dash="dash",
+                    width=2,
+                ),
+                name=f"{test.name} (median)",
+            )
+        )
+
 if show_retirement_marker and retirement_months <= display_months:
     fan_chart.add_vline(
         x=current_age + retirement_months / 12,
@@ -629,8 +735,12 @@ if (
         annotation_position="top left",
     )
 
+stress_test_info = ""
+if stress_test_results:
+    stress_test_info = f" + {len(stress_test_results)} stress test(s)"
+
 fan_chart.update_layout(
-    title="Portfolio Value Percentiles",
+    title=f"Portfolio Value Percentiles (Full Historical Data{stress_test_info})",
     xaxis_title="Age",
     yaxis_title="Balance",
     hovermode="x unified",
@@ -807,6 +917,11 @@ if enable_tax_modeling:
 if active_strategies:
     st.info(f"**Active strategies:** {' | '.join(active_strategies)}")
 
+# Stress test info
+if stress_test_results:
+    stress_names = [data["test"].name for data in stress_test_results.values()]
+    st.info(f"**Stress tests shown:** {', '.join(stress_names)} (dashed lines on chart)")
+
 # Tabs
 tabs = st.tabs(["Overview", "Distribution", "Accounts", "Risk Analysis", "Assumptions"])
 
@@ -868,12 +983,20 @@ with tabs[3]:
         )
 
 with tabs[4]:
-    st.subheader("Scenario settings")
+    st.subheader("Simulation settings")
+
+    # Historical data info
+    if "error" not in historical_summary:
+        st.caption(
+            f"Using {historical_summary['n_years']:.1f} years of market history "
+            f"({historical_summary['start_date']} to {historical_summary['end_date']})"
+        )
+
     st.write(
         {
             "Years": years,
             "Simulations": n_simulations,
-            "Scenario": scenario,
+            "Return sampling": "Full historical (block bootstrap)",
             "Withdrawal rate": f"{withdrawal_rate:.2%}",
             "Expense ratio": f"{expense_ratio:.3%}",
             "Inflation": f"{inflation_rate:.2%}" if adjust_for_inflation else "Not applied",
@@ -882,6 +1005,23 @@ with tabs[4]:
             "Guardrails": "Enabled" if use_guardrails else "Disabled",
         }
     )
+
+    # Show stress test details if enabled
+    if stress_test_results:
+        st.subheader("Stress Tests")
+        for test_id, stress_data in stress_test_results.items():
+            test = stress_data["test"]
+            stress_result = stress_data["result"]
+            st.write(
+                {
+                    "Name": test.name,
+                    "Description": test.description,
+                    "Timing": f"Month {test.apply_at}" if isinstance(test.apply_at, int) else test.apply_at.title(),
+                    "Shock magnitude": f"{test.shock_magnitude:.0%}",
+                    "Duration": f"{test.duration_months} months",
+                    "Success rate": f"{stress_result.success_rate * 100:.1f}%",
+                }
+            )
     st.subheader("Contribution summary")
     st.write(
         {
