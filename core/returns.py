@@ -1,6 +1,9 @@
+"""Historical returns data fetching and caching."""
+
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -8,6 +11,11 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from core.exceptions import DataFetchError
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
 def load_embedded_returns(path: Path) -> pd.DataFrame:
@@ -42,15 +50,26 @@ def _save_cache(data: dict[str, dict[str, list[float]]], cache_path: Path) -> No
 
 
 def _fetch_yfinance_returns(tickers: Iterable[str]) -> pd.DataFrame:
-    price_data = yf.download(
-        tickers=list(tickers),
-        auto_adjust=True,
-        progress=False,
-        interval="1mo",
-        period="max",
-    )["Close"]
+    """Fetch historical returns from yfinance."""
+    ticker_list = list(tickers)
+    logger.info(f"Fetching returns from yfinance for: {ticker_list}")
+
+    try:
+        price_data = yf.download(
+            tickers=ticker_list,
+            auto_adjust=True,
+            progress=False,
+            interval="1mo",
+            period="max",
+        )["Close"]
+    except Exception as e:
+        logger.error(f"yfinance download failed: {e}")
+        raise DataFetchError("yfinance", str(e)) from e
+
     price_data = price_data.dropna(how="all")
     returns = np.log(price_data / price_data.shift(1)).dropna()
+
+    logger.info(f"Fetched {len(returns)} months of data from yfinance")
     return returns
 
 
@@ -60,19 +79,42 @@ def get_monthly_returns(
     embedded_path: Path,
     max_age_days: int = 30,
 ) -> pd.DataFrame:
+    """
+    Get monthly returns data, using cache or fetching fresh data.
+
+    Args:
+        tickers: List of ticker symbols to fetch
+        cache_dir: Directory for caching data
+        embedded_path: Path to embedded fallback data
+        max_age_days: Maximum cache age in days
+
+    Returns:
+        DataFrame with monthly returns for each ticker
+    """
+    ticker_list = list(tickers)
     cache_path = cache_dir / "returns.json"
+
+    # Try to use cached data
     if _cache_is_fresh(cache_path, max_age_days):
-        with cache_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        return load_embedded_returns_from_payload(payload)
+        logger.info(f"Using cached returns from {cache_path}")
+        try:
+            with cache_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return load_embedded_returns_from_payload(payload)
+        except Exception as e:
+            logger.warning(f"Failed to load cache: {e}")
 
+    # Try to fetch fresh data
     try:
-        returns = _fetch_yfinance_returns(tickers)
-    except Exception:
-        return load_embedded_returns(embedded_path)
-    if returns.empty:
+        returns = _fetch_yfinance_returns(ticker_list)
+        if returns.empty:
+            logger.warning("yfinance returned empty data, using embedded fallback")
+            return load_embedded_returns(embedded_path)
+    except Exception as e:
+        logger.warning(f"yfinance fetch failed: {e}, using embedded fallback")
         return load_embedded_returns(embedded_path)
 
+    # Save to cache
     payload = {}
     for ticker in returns.columns:
         payload[ticker] = {
@@ -80,8 +122,52 @@ def get_monthly_returns(
             "returns": returns[ticker].fillna(0).tolist(),
         }
 
-    _save_cache(payload, cache_path)
+    try:
+        _save_cache(payload, cache_path)
+        logger.info(f"Saved {len(returns)} months to cache at {cache_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save cache: {e}")
+
     return returns
+
+
+def refresh_cache(
+    tickers: Iterable[str],
+    cache_dir: Path,
+) -> bool:
+    """
+    Force refresh the returns cache.
+
+    Args:
+        tickers: List of ticker symbols to fetch
+        cache_dir: Directory for caching data
+
+    Returns:
+        True if refresh succeeded, False otherwise
+    """
+    logger.info("Force refreshing returns cache")
+    cache_path = cache_dir / "returns.json"
+
+    try:
+        returns = _fetch_yfinance_returns(tickers)
+        if returns.empty:
+            logger.error("yfinance returned empty data during refresh")
+            return False
+
+        payload = {}
+        for ticker in returns.columns:
+            payload[ticker] = {
+                "dates": [d.strftime("%Y-%m-%d") for d in returns.index],
+                "returns": returns[ticker].fillna(0).tolist(),
+            }
+
+        _save_cache(payload, cache_path)
+        logger.info(f"Cache refreshed successfully with {len(returns)} months")
+        return True
+
+    except Exception as e:
+        logger.error(f"Cache refresh failed: {e}")
+        return False
 
 
 def load_embedded_returns_from_payload(payload: dict[str, dict[str, list[float]]]) -> pd.DataFrame:
@@ -107,6 +193,23 @@ def sample_returns(
     block_size: int = 12,
     volatility_multiplier: float = 1.0,
 ) -> np.ndarray:
+    """
+    Sample returns using block bootstrap for Monte Carlo simulation.
+
+    Args:
+        returns: Historical returns DataFrame
+        n_months: Number of months to simulate
+        n_simulations: Number of simulation paths
+        scenario: Market scenario (historical, recession, bull, bear, etc.)
+        block_size: Size of blocks for bootstrap (preserves autocorrelation)
+        volatility_multiplier: Multiplier for high volatility scenario
+
+    Returns:
+        3D array of shape (n_simulations, n_months, n_assets)
+    """
+    logger.debug(
+        f"Sampling returns: {n_simulations} sims, {n_months} months, scenario={scenario}"
+    )
     scenario = scenario.lower()
     returns_matrix = returns.copy()
 

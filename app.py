@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
+from core.data_validation import (
+    get_cache_status,
+    validate_returns_data,
+)
+from core.exceptions import DataFetchError
 from core.glide_path import (
     GlidePath,
     create_aggressive_glide_path,
@@ -15,11 +21,16 @@ from core.glide_path import (
     create_default_glide_path,
 )
 from core.portfolio import Allocation, allocation_from_dict
-from core.returns import get_monthly_returns, sample_returns
+from core.returns import get_monthly_returns, load_embedded_returns, sample_returns
 from core.risk_metrics import calculate_risk_metrics
-from core.simulator import Guardrails, run_simulation
+from core.simulator import Guardrails, TaxConfig, run_simulation
+from core.tax_config import CURRENT_IRS_LIMITS
 from core.validation import validate_all
 from utils.helpers import annual_to_monthly_rate, format_currency
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 CACHE_DIR = Path("data/cache")
@@ -253,6 +264,93 @@ with st.sidebar:
     else:
         guardrails = None
 
+    st.header("Tax Modeling")
+    enable_tax_modeling = st.toggle(
+        "Enable tax modeling",
+        value=False,
+        help="Model RMDs, contribution limits, and tax-efficient withdrawals.",
+    )
+
+    if enable_tax_modeling:
+        filing_status = st.selectbox(
+            "Filing status",
+            ["Single", "Married Filing Jointly"],
+            help="Tax filing status affects tax brackets.",
+        )
+        filing_status_code = "single" if filing_status == "Single" else "mfj"
+
+        cost_basis_ratio = st.slider(
+            "Taxable account cost basis",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            help="Fraction of taxable account that is original investment (not taxed on withdrawal).",
+        )
+
+        enforce_contribution_limits = st.toggle(
+            "Enforce IRS contribution limits",
+            value=True,
+            help=f"Cap contributions at IRS limits (401k: ${CURRENT_IRS_LIMITS.limit_401k:,.0f}, "
+            f"catch-up: ${CURRENT_IRS_LIMITS.limit_401k_catchup:,.0f} at age 50+).",
+        )
+
+        enforce_rmd = st.toggle(
+            "Enforce Required Minimum Distributions",
+            value=True,
+            help=f"Require minimum 401k withdrawals starting at age {CURRENT_IRS_LIMITS.rmd_start_age}.",
+        )
+
+        tax_efficient_withdrawal = st.toggle(
+            "Use tax-efficient withdrawal order",
+            value=False,
+            help="Withdraw from taxable first, then 401k, then Roth (preserves tax-advantaged growth).",
+        )
+
+        # Show contribution limit info
+        age_50_plus = current_age >= 50
+        annual_401k_limit = CURRENT_IRS_LIMITS.get_401k_limit(current_age)
+        annual_roth_limit = CURRENT_IRS_LIMITS.get_roth_ira_limit(current_age)
+        monthly_401k_max = annual_401k_limit / 12
+        monthly_roth_max = annual_roth_limit / 12
+
+        st.caption(
+            f"Your limits: 401k ${annual_401k_limit:,.0f}/yr (${monthly_401k_max:,.0f}/mo) | "
+            f"Roth ${annual_roth_limit:,.0f}/yr (${monthly_roth_max:,.0f}/mo)"
+            + (" [catch-up eligible]" if age_50_plus else "")
+        )
+
+        # Warn if contributions exceed limits
+        annual_401k_contrib = contrib_401k * 12
+        annual_roth_contrib = contrib_roth * 12
+        if annual_401k_contrib > annual_401k_limit:
+            st.warning(
+                f"401k contribution (${annual_401k_contrib:,.0f}/yr) exceeds limit (${annual_401k_limit:,.0f}/yr)"
+            )
+        if annual_roth_contrib > annual_roth_limit:
+            st.warning(
+                f"Roth contribution (${annual_roth_contrib:,.0f}/yr) exceeds limit (${annual_roth_limit:,.0f}/yr)"
+            )
+
+        # Show RMD info if applicable
+        if retirement_age >= CURRENT_IRS_LIMITS.rmd_start_age:
+            st.info(
+                f"RMDs will begin at age {CURRENT_IRS_LIMITS.rmd_start_age}. "
+                "You must withdraw a minimum amount from 401k each year."
+            )
+
+        tax_config: TaxConfig | None = TaxConfig(
+            enabled=True,
+            filing_status=filing_status_code,
+            cost_basis_ratio=cost_basis_ratio,
+            enforce_rmd=enforce_rmd,
+            enforce_contribution_limits=enforce_contribution_limits,
+            tax_efficient_withdrawal=tax_efficient_withdrawal,
+            irs_limits=CURRENT_IRS_LIMITS,
+        )
+    else:
+        tax_config = None
+
     st.header("Inflation")
     inflation_rate = st.slider(
         "Annual inflation", min_value=0.0, max_value=0.05, value=0.025, step=0.005
@@ -319,10 +417,54 @@ if not validation_result.is_valid():
     st.stop()
 
 # =============================================================================
+# DATA LOADING WITH ERROR HANDLING
+# =============================================================================
+
+# Check cache status
+cache_status = get_cache_status(CACHE_DIR / "returns.json")
+data_warning = None
+
+try:
+    returns_df = get_monthly_returns(TICKERS, CACHE_DIR, EMBEDDED_PATH)
+
+    # Validate data quality
+    data_validation = validate_returns_data(returns_df, TICKERS)
+    if not data_validation.is_valid():
+        for error in data_validation.errors:
+            st.error(f"Data error: {error}")
+        st.warning("Using embedded fallback data due to data quality issues.")
+        returns_df = load_embedded_returns(EMBEDDED_PATH)
+    elif data_validation.has_warnings():
+        data_warning = data_validation.warnings
+
+except DataFetchError as e:
+    st.error(f"Could not load market data: {e}")
+    st.info("Using embedded historical data as fallback.")
+    returns_df = load_embedded_returns(EMBEDDED_PATH)
+except Exception as e:
+    logger.error(f"Unexpected error loading data: {e}")
+    st.error("An error occurred loading market data. Using embedded fallback.")
+    returns_df = load_embedded_returns(EMBEDDED_PATH)
+
+# Show data status in sidebar expander
+with st.sidebar.expander("Data Status", expanded=False):
+    if cache_status.exists:
+        st.write(f"Cache age: {cache_status.age_days:.1f} days")
+        st.write(f"Cache size: {cache_status.size_kb:.1f} KB")
+        st.write(f"Status: {'Fresh' if cache_status.is_fresh else 'Stale'}")
+    else:
+        st.write("Cache: Not available")
+        st.write("Using: Embedded data")
+
+    if data_warning:
+        st.warning("Data warnings:")
+        for warning in data_warning:
+            st.caption(f"- {warning}")
+
+# =============================================================================
 # SIMULATION
 # =============================================================================
 
-returns_df = get_monthly_returns(TICKERS, CACHE_DIR, EMBEDDED_PATH)
 asset_returns = sample_returns(
     returns_df,
     n_months=years * 12,
@@ -355,6 +497,8 @@ result = run_simulation(
     expense_ratio=expense_ratio,
     guardrails=guardrails,
     glide_path=glide_path,
+    current_age=current_age,
+    tax_config=tax_config,
 )
 
 # Calculate enhanced risk metrics
@@ -644,13 +788,24 @@ if show_risk_metrics:
         risk_cols[3].metric("Safe withdrawal rate", "N/A")
 
 # Strategy indicators
-if use_glide_path or use_guardrails:
-    st.info(
-        f"**Active strategies:** "
-        + (f"Glide path ({glide_path_type}) " if use_glide_path else "")
-        + ("| " if use_glide_path and use_guardrails else "")
-        + (f"Guardrails (ceiling: {gr_ceiling:.0%}, floor: {gr_floor:.0%})" if use_guardrails else "")
-    )
+active_strategies = []
+if use_glide_path:
+    active_strategies.append(f"Glide path ({glide_path_type})")
+if use_guardrails:
+    active_strategies.append(f"Guardrails (ceiling: {gr_ceiling:.0%}, floor: {gr_floor:.0%})")
+if enable_tax_modeling:
+    tax_features = []
+    if enforce_contribution_limits:
+        tax_features.append("limits")
+    if enforce_rmd:
+        tax_features.append("RMD")
+    if tax_efficient_withdrawal:
+        tax_features.append("tax-efficient")
+    if tax_features:
+        active_strategies.append(f"Tax modeling ({', '.join(tax_features)})")
+
+if active_strategies:
+    st.info(f"**Active strategies:** {' | '.join(active_strategies)}")
 
 # Tabs
 tabs = st.tabs(["Overview", "Distribution", "Accounts", "Risk Analysis", "Assumptions"])
@@ -765,5 +920,20 @@ with tabs[4]:
                 "Spending floor": f"{guardrails.floor:.0%}",
                 "Upper threshold": f"{guardrails.upper_threshold:.0%}",
                 "Lower threshold": f"{guardrails.lower_threshold:.0%}",
+            }
+        )
+
+    if enable_tax_modeling and tax_config is not None:
+        st.subheader("Tax Modeling Details")
+        st.write(
+            {
+                "Filing status": filing_status,
+                "Cost basis ratio": f"{cost_basis_ratio:.0%}",
+                "Contribution limits": "Enforced" if enforce_contribution_limits else "Disabled",
+                "RMD enforcement": "Enabled" if enforce_rmd else "Disabled",
+                "Tax-efficient withdrawal": "Enabled" if tax_efficient_withdrawal else "Disabled",
+                "401k annual limit": format_currency(CURRENT_IRS_LIMITS.get_401k_limit(current_age)),
+                "Roth IRA annual limit": format_currency(CURRENT_IRS_LIMITS.get_roth_ira_limit(current_age)),
+                "RMD start age": CURRENT_IRS_LIMITS.rmd_start_age,
             }
         )
