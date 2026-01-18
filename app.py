@@ -71,7 +71,7 @@ def currency_input(label: str, value: float, key: str, help_text: str | None = N
 
 with st.sidebar:
     st.header("Profile")
-    current_age = st.number_input("Current age", min_value=18, max_value=80, value=35)
+    current_age = st.number_input("Current age", min_value=18, max_value=80, value=29)
     retirement_age = st.number_input(
         "Retirement age", min_value=current_age + 1, max_value=90, value=65
     )
@@ -85,7 +85,7 @@ with st.sidebar:
     st.header("Current balances")
     balance_401k = currency_input(
         "401k balance",
-        value=150_000.0,
+        value=190_000.0,
         key="balance_401k",
         help_text="Enter a dollar amount (commas and $ optional).",
     )
@@ -97,7 +97,7 @@ with st.sidebar:
     )
     balance_taxable = currency_input(
         "After-tax balance",
-        value=25_000.0,
+        value=250_000.0,
         key="balance_taxable",
         help_text="Enter a dollar amount (commas and $ optional).",
     )
@@ -105,7 +105,7 @@ with st.sidebar:
     st.header("Monthly contributions")
     contrib_401k = currency_input(
         "401k contribution",
-        value=900.0,
+        value=2000.0,
         key="contrib_401k",
         help_text="Monthly contribution in dollars.",
     )
@@ -117,19 +117,19 @@ with st.sidebar:
     )
     contrib_taxable = currency_input(
         "After-tax contribution",
-        value=300.0,
+        value=5_000.0,
         key="contrib_taxable",
         help_text="Monthly contribution in dollars.",
     )
     st.subheader("Soft retirement contribution choices")
     continue_401k = st.checkbox("Continue 401k contributions", value=True)
     continue_roth = st.checkbox("Continue Roth IRA contributions", value=True)
-    continue_taxable = st.checkbox("Continue after-tax contributions", value=True)
+    continue_taxable = st.checkbox("Continue after-tax contributions", value=False)
     soft_contribution_factor = st.slider(
         "Contributions after soft retirement",
         min_value=0.0,
         max_value=1.0,
-        value=0.5,
+        value=1.0,
         step=0.05,
         help="Scale selected contributions after the soft retirement age "
         "(1.0 keeps contributions unchanged).",
@@ -200,12 +200,12 @@ with st.sidebar:
         sgov_alloc = 100 - us_alloc - vxus_alloc
     else:
         glide_path = None
-        us_alloc = st.slider("US (VTI)", min_value=0, max_value=100, value=60)
-        vxus_alloc = st.slider("International (VXUS)", min_value=0, max_value=100, value=30)
-        sgov_alloc = st.slider("Treasuries (SGOV)", min_value=0, max_value=100, value=10)
+        us_alloc = st.slider("US (VTI)", min_value=0, max_value=100, value=30)
+        vxus_alloc = st.slider("International (VXUS)", min_value=0, max_value=100, value=65)
+        sgov_alloc = st.slider("Treasuries (SGOV)", min_value=0, max_value=100, value=5)
 
     st.header("Simulation")
-    years = st.slider("Years to project", min_value=5, max_value=60, value=30)
+    years = st.slider("Years to project", min_value=5, max_value=71, value=70)
     n_simulations = st.select_slider(
         "Number of simulations", options=[250, 500, 1000, 2500, 5000], value=1000
     )
