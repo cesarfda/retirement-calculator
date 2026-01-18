@@ -1058,6 +1058,34 @@ if retirement_months < len(percentile_series["p50"]):
 else:
     summary_cols[3].metric("Median at retirement", "N/A")
 
+# Withdrawal range at retirement (today's dollars)
+if retirement_months < len(result.total_paths[0]):
+    retirement_balances = result.total_paths[:, retirement_months] / inflation_factors[
+        retirement_months
+    ]
+    annual_withdrawals = retirement_balances * withdrawal_rate
+    withdrawal_p5 = np.percentile(annual_withdrawals, 5)
+    withdrawal_p50 = np.percentile(annual_withdrawals, 50)
+    withdrawal_p95 = np.percentile(annual_withdrawals, 95)
+    withdrawal_cols = st.columns(3)
+    withdrawal_cols[0].metric(
+        "Annual withdrawal (5th pct)",
+        format_currency(withdrawal_p5),
+        help="Estimated annual withdrawal at retirement in today's dollars (5th percentile).",
+    )
+    withdrawal_cols[1].metric(
+        "Annual withdrawal (median)",
+        format_currency(withdrawal_p50),
+        help="Estimated annual withdrawal at retirement in today's dollars (median).",
+    )
+    withdrawal_cols[2].metric(
+        "Annual withdrawal (95th pct)",
+        format_currency(withdrawal_p95),
+        help="Estimated annual withdrawal at retirement in today's dollars (95th percentile).",
+    )
+else:
+    st.metric("Annual withdrawal at retirement", "N/A")
+
 # Risk metrics - second row (if enabled)
 if show_risk_metrics:
     risk_cols = st.columns(4)
