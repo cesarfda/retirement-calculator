@@ -31,24 +31,15 @@ def parse_currency(value: str, fallback: float) -> float:
         return fallback
 
 
-def normalize_currency_key(state_key: str, fallback: float) -> None:
-    raw_value = st.session_state.get(state_key, "")
-    parsed_value = parse_currency(raw_value, fallback)
-    st.session_state[state_key] = format_currency(parsed_value)
-
-
 def currency_input(label: str, value: float, key: str, help_text: str | None = None) -> float:
-    widget_key = f"{key}_input"
-    if widget_key not in st.session_state:
-        st.session_state[widget_key] = format_currency(value)
-    st.text_input(
-        label,
-        key=widget_key,
-        help=help_text,
-        on_change=normalize_currency_key,
-        args=(widget_key, value),
-    )
-    return parse_currency(st.session_state.get(widget_key, ""), value)
+    if key not in st.session_state:
+        st.session_state[key] = format_currency(value)
+    raw_value = st.text_input(label, key=key, help=help_text)
+    parsed_value = parse_currency(raw_value, value)
+    formatted_value = format_currency(parsed_value)
+    if raw_value != formatted_value:
+        st.session_state[key] = formatted_value
+    return parsed_value
 
 with st.sidebar:
     st.header("Profile")
