@@ -481,14 +481,49 @@ with st.sidebar:
     valuation_adjustment = None
     if use_valuation_adjustment:
         from core.returns import ValuationAdjustment
-        current_cape = st.number_input(
-            "Current CAPE (Shiller P/E)",
-            min_value=10.0,
-            max_value=50.0,
-            value=30.0,
-            step=1.0,
-            help="Current Shiller P/E ratio. Historical median is ~16.",
-        )
+
+        st.caption("**US Market (S&P 500)**")
+        cape_cols = st.columns(2)
+        with cape_cols[0]:
+            us_cape = st.number_input(
+                "US CAPE",
+                min_value=10.0,
+                max_value=50.0,
+                value=30.0,
+                step=1.0,
+                help="Current Shiller P/E for S&P 500. Historical median ~16.",
+            )
+        with cape_cols[1]:
+            us_cape_median = st.number_input(
+                "US historical median",
+                min_value=10.0,
+                max_value=25.0,
+                value=16.0,
+                step=0.5,
+                help="Long-term median CAPE for US market.",
+            )
+
+        st.caption("**International Market (EAFE)**")
+        intl_cols = st.columns(2)
+        with intl_cols[0]:
+            intl_cape = st.number_input(
+                "Intl CAPE",
+                min_value=8.0,
+                max_value=40.0,
+                value=16.0,
+                step=1.0,
+                help="Current CAPE for international developed markets. Historical median ~14.",
+            )
+        with intl_cols[1]:
+            intl_cape_median = st.number_input(
+                "Intl historical median",
+                min_value=8.0,
+                max_value=20.0,
+                value=14.0,
+                step=0.5,
+                help="Long-term median CAPE for international markets.",
+            )
+
         valuation_factor = st.slider(
             "Adjustment strength",
             min_value=0.0,
@@ -497,15 +532,22 @@ with st.sidebar:
             step=0.1,
             help="0 = no adjustment, 1 = full adjustment based on CAPE premium.",
         )
+
         valuation_adjustment = ValuationAdjustment(
             enabled=True,
-            current_cape=current_cape,
+            us_cape=us_cape,
+            us_cape_median=us_cape_median,
+            intl_cape=intl_cape,
+            intl_cape_median=intl_cape_median,
             adjustment_factor=valuation_factor,
         )
-        monthly_drag = valuation_adjustment.calculate_monthly_drag()
-        annual_drag = monthly_drag * 12
+
+        us_annual_drag = valuation_adjustment.calculate_us_monthly_drag() * 12
+        intl_annual_drag = valuation_adjustment.calculate_intl_monthly_drag() * 12
+
         st.caption(
-            f"Expected equity return reduced by {annual_drag:.1%}/year due to elevated valuations."
+            f"US equity return reduced by {us_annual_drag:.1%}/year | "
+            f"Intl equity return reduced by {intl_annual_drag:.1%}/year"
         )
 
     st.header("Visualization")
@@ -667,7 +709,8 @@ if use_valuation_adjustment and valuation_adjustment is not None:
     asset_returns = apply_valuation_adjustment(
         asset_returns,
         valuation_adjustment,
-        equity_columns=[0, 1],  # US and International
+        us_column=0,     # US stocks (SPY)
+        intl_column=1,   # International (EFA)
     )
 
 retirement_months = max((retirement_age - current_age) * 12, 0)

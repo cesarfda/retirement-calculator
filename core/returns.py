@@ -26,40 +26,74 @@ class ValuationAdjustment:
     norms, future returns tend to be lower. This adjustment reduces expected
     equity returns proportionally to the valuation premium.
 
+    Supports separate CAPE values for US and International markets since
+    they have different historical valuation norms:
+    - US (S&P 500): Historical median CAPE ~16-17
+    - International (EAFE): Historical median CAPE ~14-15
+
     Attributes:
         enabled: Whether to apply valuation adjustment
-        current_cape: Current Shiller P/E ratio (CAPE)
-        historical_cape_median: Long-term median CAPE (typically ~16)
+        us_cape: Current US market CAPE (Shiller P/E for S&P 500)
+        us_cape_median: Historical median US CAPE (typically ~16)
+        intl_cape: Current International market CAPE (EAFE or similar)
+        intl_cape_median: Historical median International CAPE (typically ~14)
         adjustment_factor: How much to adjust (0=none, 1=full adjustment)
         max_annual_drag: Maximum annual return reduction (cap extreme adjustments)
     """
 
     enabled: bool = False
-    current_cape: float = 30.0  # Current elevated valuations
-    historical_cape_median: float = 16.0
+    # US market valuations
+    us_cape: float = 30.0  # Current elevated US valuations
+    us_cape_median: float = 16.0  # Historical median for S&P 500
+    # International market valuations
+    intl_cape: float = 16.0  # Current international valuations
+    intl_cape_median: float = 14.0  # Historical median for EAFE
+    # Adjustment parameters
     adjustment_factor: float = 0.5  # 50% adjustment (conservative)
     max_annual_drag: float = 0.03  # Cap at 3% annual reduction
 
-    def calculate_monthly_drag(self) -> float:
+    def calculate_us_monthly_drag(self) -> float:
         """
-        Calculate monthly return drag based on valuation premium.
+        Calculate monthly return drag for US equities based on valuation premium.
 
         Uses the relationship: higher CAPE -> lower future returns.
         Research suggests ~2% lower returns per 100% CAPE premium.
         """
-        if not self.enabled or self.historical_cape_median <= 0:
+        if not self.enabled or self.us_cape_median <= 0:
             return 0.0
 
-        cape_ratio = self.current_cape / self.historical_cape_median
+        cape_ratio = self.us_cape / self.us_cape_median
         if cape_ratio <= 1.0:
-            # At or below historical median - no drag
             return 0.0
 
-        # Calculate drag: ~2% per 100% overvaluation, scaled by adjustment_factor
         annual_drag = (cape_ratio - 1) * 0.02 * self.adjustment_factor
         annual_drag = min(annual_drag, self.max_annual_drag)
 
         return annual_drag / 12
+
+    def calculate_intl_monthly_drag(self) -> float:
+        """
+        Calculate monthly return drag for International equities based on valuation premium.
+        """
+        if not self.enabled or self.intl_cape_median <= 0:
+            return 0.0
+
+        cape_ratio = self.intl_cape / self.intl_cape_median
+        if cape_ratio <= 1.0:
+            return 0.0
+
+        annual_drag = (cape_ratio - 1) * 0.02 * self.adjustment_factor
+        annual_drag = min(annual_drag, self.max_annual_drag)
+
+        return annual_drag / 12
+
+    def calculate_monthly_drag(self) -> float:
+        """
+        Calculate average monthly drag (for backward compatibility).
+
+        Returns the US drag for simple single-value use cases.
+        """
+        return self.calculate_us_monthly_drag()
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -373,18 +407,21 @@ def sample_returns_student_t(
 def apply_valuation_adjustment(
     sampled_returns: np.ndarray,
     adjustment: ValuationAdjustment,
-    equity_columns: list[int] | None = None,
+    us_column: int = 0,
+    intl_column: int = 1,
 ) -> np.ndarray:
     """
     Apply valuation-based return adjustment to sampled returns.
 
     Reduces expected equity returns when valuations are elevated.
-    Only affects equity asset classes, not bonds.
+    Applies separate adjustments to US and International equities based
+    on their respective CAPE ratios and historical medians.
 
     Args:
         sampled_returns: Sampled returns array (n_sims, n_months, n_assets)
-        adjustment: ValuationAdjustment configuration
-        equity_columns: Indices of equity columns (default: first 2)
+        adjustment: ValuationAdjustment configuration with US and Intl CAPE
+        us_column: Column index for US equities (default: 0)
+        intl_column: Column index for International equities (default: 1)
 
     Returns:
         Adjusted returns array
@@ -392,22 +429,29 @@ def apply_valuation_adjustment(
     if not adjustment.enabled:
         return sampled_returns
 
-    monthly_drag = adjustment.calculate_monthly_drag()
-    if monthly_drag <= 0:
+    us_drag = adjustment.calculate_us_monthly_drag()
+    intl_drag = adjustment.calculate_intl_monthly_drag()
+
+    if us_drag <= 0 and intl_drag <= 0:
         return sampled_returns
 
-    if equity_columns is None:
-        # Assume first 2 columns are equities (US, International)
-        equity_columns = [0, 1]
-
     adjusted = sampled_returns.copy()
-    for col in equity_columns:
-        if col < adjusted.shape[2]:
-            adjusted[:, :, col] -= monthly_drag
 
-    logger.info(
-        f"Applied valuation adjustment: {monthly_drag * 12:.2%} annual drag on equities"
-    )
+    # Apply US drag
+    if us_drag > 0 and us_column < adjusted.shape[2]:
+        adjusted[:, :, us_column] -= us_drag
+        logger.info(
+            f"Applied US valuation adjustment: {us_drag * 12:.2%} annual drag "
+            f"(CAPE {adjustment.us_cape:.1f} vs median {adjustment.us_cape_median:.1f})"
+        )
+
+    # Apply International drag
+    if intl_drag > 0 and intl_column < adjusted.shape[2]:
+        adjusted[:, :, intl_column] -= intl_drag
+        logger.info(
+            f"Applied Intl valuation adjustment: {intl_drag * 12:.2%} annual drag "
+            f"(CAPE {adjustment.intl_cape:.1f} vs median {adjustment.intl_cape_median:.1f})"
+        )
 
     return adjusted
 
