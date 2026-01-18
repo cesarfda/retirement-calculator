@@ -24,6 +24,12 @@ with st.sidebar:
     st.header("Profile")
     current_age = st.number_input("Current age", min_value=18, max_value=80, value=35)
     retirement_age = st.number_input("Retirement age", min_value=current_age + 1, max_value=90, value=65)
+    soft_retirement_age = st.number_input(
+        "Soft retirement age",
+        min_value=current_age + 1,
+        max_value=retirement_age,
+        value=max(min(current_age + 10, retirement_age), current_age + 1),
+    )
 
     st.header("Current balances")
     balance_401k = st.number_input("401k balance", value=150_000.0, step=5_000.0)
@@ -34,6 +40,14 @@ with st.sidebar:
     contrib_401k = st.number_input("401k contribution", value=900.0, step=50.0)
     contrib_roth = st.number_input("Roth IRA contribution", value=400.0, step=25.0)
     contrib_taxable = st.number_input("After-tax contribution", value=300.0, step=25.0)
+    soft_contribution_factor = st.slider(
+        "Contributions after soft retirement",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.5,
+        step=0.05,
+        help="Scale contributions after the soft retirement age (1.0 keeps contributions unchanged).",
+    )
 
     st.header("Employer match")
     match_rate = st.slider("Match rate", min_value=0.0, max_value=1.0, value=0.5, step=0.05)
@@ -49,7 +63,7 @@ with st.sidebar:
     n_simulations = st.select_slider("Number of simulations", options=[250, 500, 1000, 2500, 5000], value=1000)
     scenario = st.selectbox(
         "Market scenario",
-        ["Historical", "Bull", "Bear", "High Volatility"],
+        ["Historical", "Recession", "Lost Decade", "Bull", "Bear", "High Volatility"],
     )
     volatility_multiplier = st.slider("High volatility multiplier", min_value=1.0, max_value=2.0, value=1.3, step=0.1)
     withdrawal_rate = st.slider("Withdrawal rate", min_value=0.02, max_value=0.08, value=0.04, step=0.005)
@@ -75,6 +89,7 @@ with st.sidebar:
     if not selected_percentiles:
         selected_percentiles = ["50th"]
     show_retirement_marker = st.toggle("Highlight retirement month", value=True)
+    show_soft_retirement_marker = st.toggle("Highlight soft retirement month", value=True)
     show_percentile_bands = st.toggle("Show percentile bands", value=True)
     show_account_area = st.toggle("Show account breakdown", value=True)
     show_success_chart = st.toggle("Show success over time", value=True)
@@ -92,6 +107,7 @@ asset_returns = sample_returns(
 )
 
 retirement_months = max((retirement_age - current_age) * 12, 0)
+soft_retirement_months = max((soft_retirement_age - current_age) * 12, 0)
 
 result = run_simulation(
     initial_balances={"401k": balance_401k, "roth": balance_roth, "taxable": balance_taxable},
@@ -108,6 +124,8 @@ result = run_simulation(
     scenario=scenario,
     asset_returns=asset_returns,
     retirement_months=retirement_months,
+    soft_retirement_months=soft_retirement_months,
+    soft_contribution_factor=soft_contribution_factor,
     withdrawal_rate=withdrawal_rate,
 )
 
@@ -201,6 +219,18 @@ if show_retirement_marker and retirement_months <= display_months:
         line_dash="dot",
         line_color="gray",
         annotation_text="Retirement",
+        annotation_position="top left",
+    )
+if (
+    show_soft_retirement_marker
+    and soft_retirement_months <= display_months
+    and soft_retirement_months < retirement_months
+):
+    fan_chart.add_vline(
+        x=soft_retirement_months,
+        line_dash="dash",
+        line_color="#6f42c1",
+        annotation_text="Soft retirement",
         annotation_position="top left",
     )
 fan_chart.update_layout(
@@ -329,6 +359,7 @@ with tabs[3]:
             "Scenario": scenario,
             "Withdrawal rate": f"{withdrawal_rate:.2%}",
             "Inflation": f"{inflation_rate:.2%}" if adjust_for_inflation else "Not applied",
+            "Soft retirement age": soft_retirement_age,
         }
     )
     st.subheader("Contribution summary")
@@ -337,6 +368,7 @@ with tabs[3]:
             "401k": format_currency(contrib_401k),
             "Roth IRA": format_currency(contrib_roth),
             "After-tax": format_currency(contrib_taxable),
+            "Post-soft retirement factor": f"{soft_contribution_factor:.0%}",
             "Employer match": f"{match_rate:.0%} up to {format_currency(match_cap)}",
         }
     )
