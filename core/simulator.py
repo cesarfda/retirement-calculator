@@ -9,6 +9,7 @@ import numpy as np
 
 from core.accounts import apply_employer_match
 from core.portfolio import Allocation, portfolio_returns
+from core.roth_conversion import RothConversionStrategy, calculate_optimal_roth_conversion
 from core.tax_config import CURRENT_IRS_LIMITS, IRSLimits, calculate_rmd
 from utils.helpers import Percentiles, annual_to_monthly_rate
 
@@ -153,6 +154,7 @@ class TaxConfig:
         enforce_contribution_limits: Whether to enforce IRS contribution limits
         tax_efficient_withdrawal: Whether to use tax-efficient withdrawal ordering
         irs_limits: IRS limits to use (defaults to current year)
+        roth_conversion: Optional Roth conversion strategy configuration
     """
 
     enabled: bool = False
@@ -162,6 +164,7 @@ class TaxConfig:
     enforce_contribution_limits: bool = True
     tax_efficient_withdrawal: bool = False
     irs_limits: IRSLimits = CURRENT_IRS_LIMITS
+    roth_conversion: RothConversionStrategy | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +280,56 @@ def _apply_contributions(
     ytd_contributions["roth"] += effective_roth
 
     return ytd_contributions
+
+
+def _apply_roth_conversions(
+    balances: np.ndarray,
+    strategy: RothConversionStrategy,
+    filing_status: str = "single",
+) -> None:
+    """
+    Apply Roth conversions from 401k to Roth (in-place).
+
+    Roth conversions move money from traditional 401k to Roth IRA,
+    paying taxes now to avoid higher taxes later (especially RMDs).
+
+    This is a simplified model that converts a fixed amount based on
+    the target bracket, without explicitly modeling the tax payment.
+    In reality, taxes would be paid from taxable account or cash.
+
+    Args:
+        balances: Account balances array (n_sims, 3) - modified in-place
+                  [0] = 401k, [1] = Roth, [2] = Taxable
+        strategy: Roth conversion strategy configuration
+        filing_status: Tax filing status for bracket calculation
+    """
+    n_sims = balances.shape[0]
+
+    for i in range(n_sims):
+        traditional_balance = balances[i, 0]
+
+        if traditional_balance < strategy.min_traditional_balance:
+            continue
+
+        # Calculate optimal conversion amount
+        # Assume minimal other income during conversion window
+        conversion = calculate_optimal_roth_conversion(
+            traditional_balance=traditional_balance,
+            current_taxable_income=0.0,  # Assume low income during conversion
+            filing_status=filing_status,
+            target_bracket=strategy.target_bracket,
+            max_conversion=strategy.max_annual_conversion,
+        )
+
+        if conversion > 0:
+            # Move from 401k to Roth
+            balances[i, 0] -= conversion
+            balances[i, 1] += conversion
+
+            # Note: In a more sophisticated model, we would:
+            # 1. Calculate the tax owed on the conversion
+            # 2. Pay that tax from the taxable account
+            # For simplicity, we assume taxes are paid from outside sources
 
 
 def _apply_withdrawals_tax_aware(
@@ -525,6 +578,7 @@ def run_simulation(
     )
     irs_limits = tax_config.irs_limits if tax_config else CURRENT_IRS_LIMITS
     cost_basis_ratio = tax_config.cost_basis_ratio if tax_config else 0.5
+    roth_conversion = tax_config.roth_conversion if tax_config else None
 
     for month in range(months):
         # Calculate current age
@@ -613,6 +667,19 @@ def run_simulation(
                 irs_limits,
                 enforce_limits,
             )
+
+            # Apply Roth conversions (once per year, at start of year)
+            if (
+                roth_conversion is not None
+                and roth_conversion.enabled
+                and month % 12 == 0  # Start of year
+                and roth_conversion.is_active_at_age(age)
+            ):
+                _apply_roth_conversions(
+                    balances[:, month, :],
+                    roth_conversion,
+                    tax_config.filing_status if tax_config else "single",
+                )
 
         # Copy to next month's starting balance
         balances[:, month + 1, :] = balances[:, month, :]

@@ -374,6 +374,66 @@ with st.sidebar:
                 "You must withdraw a minimum amount from 401k each year."
             )
 
+        # Roth Conversion Strategy
+        st.subheader("Roth Conversion Strategy")
+        enable_roth_conversion = st.toggle(
+            "Enable Roth conversions",
+            value=False,
+            help="Convert 401k to Roth during low-income years to reduce future RMDs and taxes.",
+        )
+
+        roth_conversion_strategy = None
+        if enable_roth_conversion:
+            roth_target_bracket = st.selectbox(
+                "Target tax bracket to fill",
+                options=[0.10, 0.12, 0.22, 0.24],
+                format_func=lambda x: f"{x:.0%} bracket",
+                index=2,  # Default to 22%
+                help="Convert enough to fill up to this marginal tax bracket.",
+            )
+            roth_max_conversion = st.number_input(
+                "Max annual conversion",
+                min_value=10000,
+                max_value=200000,
+                value=50000,
+                step=5000,
+                help="Maximum amount to convert per year.",
+            )
+            roth_start_age = st.number_input(
+                "Start conversions at age",
+                min_value=current_age,
+                max_value=72,
+                value=max(soft_retirement_age, current_age),
+                help="Typically start when income drops (soft retirement).",
+            )
+            roth_stop_age = st.number_input(
+                "Stop conversions at age",
+                min_value=roth_start_age + 1,
+                max_value=73,
+                value=72,
+                help="Stop before RMDs begin at 73.",
+            )
+
+            from core.roth_conversion import RothConversionStrategy
+            roth_conversion_strategy = RothConversionStrategy(
+                enabled=True,
+                target_bracket=roth_target_bracket,
+                max_annual_conversion=float(roth_max_conversion),
+                start_age=roth_start_age,
+                stop_age=roth_stop_age,
+            )
+
+            st.caption(
+                f"Conversions will occur annually from age {roth_start_age} to {roth_stop_age}, "
+                f"converting up to ${roth_max_conversion:,.0f}/year to fill the {roth_target_bracket:.0%} bracket."
+            )
+
+        # NIIT info
+        st.caption(
+            "Note: Net Investment Income Tax (3.8%) automatically applies to investment income "
+            "above $200k (single) / $250k (married)."
+        )
+
         tax_config: TaxConfig | None = TaxConfig(
             enabled=True,
             filing_status=filing_status_code,
@@ -382,6 +442,7 @@ with st.sidebar:
             enforce_contribution_limits=enforce_contribution_limits,
             tax_efficient_withdrawal=tax_efficient_withdrawal,
             irs_limits=CURRENT_IRS_LIMITS,
+            roth_conversion=roth_conversion_strategy,
         )
     else:
         tax_config = None
@@ -391,6 +452,61 @@ with st.sidebar:
         "Annual inflation", min_value=0.0, max_value=0.05, value=0.025, step=0.005
     )
     adjust_for_inflation = st.toggle("Show inflation-adjusted results", value=True)
+
+    st.header("Return Modeling")
+    use_fat_tails = st.toggle(
+        "Use fat-tailed returns",
+        value=False,
+        help="Use Student-t distribution instead of historical bootstrap. "
+        "Better captures extreme market events.",
+    )
+
+    fat_tail_df = 5  # Default degrees of freedom
+    if use_fat_tails:
+        fat_tail_df = st.slider(
+            "Tail fatness (degrees of freedom)",
+            min_value=3,
+            max_value=30,
+            value=5,
+            help="Lower = fatter tails (more extreme events). "
+            "5 is typical for equities, 30 is nearly normal.",
+        )
+
+    use_valuation_adjustment = st.toggle(
+        "Adjust for current valuations",
+        value=False,
+        help="Reduce expected equity returns when CAPE is elevated above historical median.",
+    )
+
+    valuation_adjustment = None
+    if use_valuation_adjustment:
+        from core.returns import ValuationAdjustment
+        current_cape = st.number_input(
+            "Current CAPE (Shiller P/E)",
+            min_value=10.0,
+            max_value=50.0,
+            value=30.0,
+            step=1.0,
+            help="Current Shiller P/E ratio. Historical median is ~16.",
+        )
+        valuation_factor = st.slider(
+            "Adjustment strength",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.1,
+            help="0 = no adjustment, 1 = full adjustment based on CAPE premium.",
+        )
+        valuation_adjustment = ValuationAdjustment(
+            enabled=True,
+            current_cape=current_cape,
+            adjustment_factor=valuation_factor,
+        )
+        monthly_drag = valuation_adjustment.calculate_monthly_drag()
+        annual_drag = monthly_drag * 12
+        st.caption(
+            f"Expected equity return reduced by {annual_drag:.1%}/year due to elevated valuations."
+        )
 
     st.header("Visualization")
     display_months = st.slider(
@@ -527,13 +643,32 @@ with st.sidebar.expander("Data Status", expanded=False):
 # Get historical data summary
 historical_summary = get_historical_summary(returns_df)
 
-# Sample returns from FULL historical data (includes all market conditions)
-asset_returns = sample_returns(
-    returns_df,
-    n_months=years * 12,
-    n_simulations=n_simulations,
-    block_size=12,
-)
+# Sample returns based on selected method
+if use_fat_tails:
+    from core.returns import sample_returns_student_t
+    asset_returns = sample_returns_student_t(
+        returns_df,
+        n_months=years * 12,
+        n_simulations=n_simulations,
+        degrees_of_freedom=fat_tail_df,
+    )
+else:
+    # Use block bootstrap from FULL historical data
+    asset_returns = sample_returns(
+        returns_df,
+        n_months=years * 12,
+        n_simulations=n_simulations,
+        block_size=12,
+    )
+
+# Apply valuation adjustment if enabled
+if use_valuation_adjustment and valuation_adjustment is not None:
+    from core.returns import apply_valuation_adjustment
+    asset_returns = apply_valuation_adjustment(
+        asset_returns,
+        valuation_adjustment,
+        equity_columns=[0, 1],  # US and International
+    )
 
 retirement_months = max((retirement_age - current_age) * 12, 0)
 soft_retirement_months = max((soft_retirement_age - current_age) * 12, 0)
@@ -916,6 +1051,37 @@ if show_risk_metrics:
     else:
         risk_cols[3].metric("Safe withdrawal rate", "N/A")
 
+    # Enhanced metrics - third row
+    enhanced_cols = st.columns(4)
+    enhanced_cols[0].metric(
+        "CVaR 95%",
+        format_currency(risk_metrics.cvar_95 / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.cvar_95),
+        help="Expected Shortfall: Average ending balance in worst 5% of scenarios.",
+    )
+    enhanced_cols[1].metric(
+        "CVaR 99%",
+        format_currency(risk_metrics.cvar_99 / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.cvar_99),
+        help="Expected Shortfall: Average ending balance in worst 1% of scenarios.",
+    )
+    if risk_metrics.legacy_metrics:
+        enhanced_cols[2].metric(
+            "P(Leave $500k+)",
+            f"{risk_metrics.legacy_metrics.prob_leave_500k * 100:.0f}%",
+            help="Probability of leaving at least $500k to heirs.",
+        )
+        enhanced_cols[3].metric(
+            "Expected Legacy",
+            format_currency(risk_metrics.legacy_metrics.expected_legacy / inflation_factors[-1]) if adjust_for_inflation else format_currency(risk_metrics.legacy_metrics.expected_legacy),
+            help="Expected (average) ending balance across successful simulations.",
+        )
+
+    # Spending flexibility info
+    if risk_metrics.spending_flexibility and risk_metrics.spending_flexibility.improvement > 0:
+        st.caption(
+            f"**Spending flexibility bonus:** If you can cut spending by 10% during downturns, "
+            f"success rate could improve by ~{risk_metrics.spending_flexibility.improvement * 100:.1f} percentage points."
+        )
+
 # Strategy indicators
 active_strategies = []
 if use_glide_path:
@@ -930,8 +1096,14 @@ if enable_tax_modeling:
         tax_features.append("RMD")
     if tax_efficient_withdrawal:
         tax_features.append("tax-efficient")
+    if 'enable_roth_conversion' in dir() and enable_roth_conversion:
+        tax_features.append("Roth conversion")
     if tax_features:
         active_strategies.append(f"Tax modeling ({', '.join(tax_features)})")
+if use_fat_tails:
+    active_strategies.append(f"Fat-tailed returns (df={fat_tail_df})")
+if use_valuation_adjustment:
+    active_strategies.append("Valuation-adjusted returns")
 
 if active_strategies:
     st.info(f"**Active strategies:** {' | '.join(active_strategies)}")
@@ -999,6 +1171,77 @@ with tabs[3]:
                 if risk_metrics.average_shortfall > 0
                 else "N/A",
             }
+        )
+
+    # CVaR Analysis
+    st.subheader("Tail Risk Analysis (CVaR / Expected Shortfall)")
+    cvar_cols = st.columns(2)
+    with cvar_cols[0]:
+        st.write(
+            {
+                "CVaR 95% (worst 5% average)": format_currency(
+                    risk_metrics.cvar_95 / inflation_factors[-1]
+                ),
+                "CVaR 99% (worst 1% average)": format_currency(
+                    risk_metrics.cvar_99 / inflation_factors[-1]
+                ),
+            }
+        )
+        st.caption(
+            "CVaR (Conditional Value at Risk) shows the average ending balance in the worst scenarios. "
+            "Unlike VaR, it captures the severity of tail losses, not just the threshold."
+        )
+
+    with cvar_cols[1]:
+        if risk_metrics.spending_flexibility:
+            st.write(
+                {
+                    "Base success rate": f"{risk_metrics.spending_flexibility.base_success_rate:.1%}",
+                    "With 10% spending flexibility": f"{risk_metrics.spending_flexibility.flexible_success_rate:.1%}",
+                    "Improvement": f"+{risk_metrics.spending_flexibility.improvement:.1%}",
+                }
+            )
+            st.caption(
+                "Spending flexibility shows how much your success rate improves if you can reduce "
+                "spending by 10% during market downturns."
+            )
+
+    # Legacy Analysis
+    if risk_metrics.legacy_metrics:
+        st.subheader("Legacy / Bequest Analysis")
+        legacy_cols = st.columns(3)
+        with legacy_cols[0]:
+            st.metric(
+                "P(Leave $100k+)",
+                f"{risk_metrics.legacy_metrics.prob_leave_100k:.0%}",
+            )
+        with legacy_cols[1]:
+            st.metric(
+                "P(Leave $500k+)",
+                f"{risk_metrics.legacy_metrics.prob_leave_500k:.0%}",
+            )
+        with legacy_cols[2]:
+            st.metric(
+                "P(Leave $1M+)",
+                f"{risk_metrics.legacy_metrics.prob_leave_1m:.0%}",
+            )
+
+        st.write(
+            {
+                "Expected legacy (mean)": format_currency(
+                    risk_metrics.legacy_metrics.expected_legacy / inflation_factors[-1]
+                ),
+                "Median legacy": format_currency(
+                    risk_metrics.legacy_metrics.median_legacy / inflation_factors[-1]
+                ),
+                "Conservative legacy (10th percentile)": format_currency(
+                    risk_metrics.legacy_metrics.legacy_at_risk / inflation_factors[-1]
+                ),
+            }
+        )
+        st.caption(
+            "Legacy metrics show the probability and expected amount you would leave to heirs. "
+            "The 10th percentile is a conservative estimate for planning purposes."
         )
 
 with tabs[4]:

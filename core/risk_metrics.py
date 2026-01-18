@@ -8,6 +8,54 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class LegacyMetrics:
+    """
+    Metrics for legacy/bequest planning.
+
+    For retirees who want to leave money to heirs, these metrics
+    provide probability estimates for various legacy amounts.
+
+    Attributes:
+        prob_leave_100k: Probability of ending with > $100k
+        prob_leave_500k: Probability of ending with > $500k
+        prob_leave_1m: Probability of ending with > $1M
+        expected_legacy: Expected (mean) ending balance
+        median_legacy: Median ending balance
+        legacy_at_risk: 10th percentile (conservative legacy estimate)
+    """
+
+    prob_leave_100k: float
+    prob_leave_500k: float
+    prob_leave_1m: float
+    expected_legacy: float
+    median_legacy: float
+    legacy_at_risk: float  # 10th percentile
+
+
+@dataclass(frozen=True)
+class SpendingFlexibilityResult:
+    """
+    Results from spending flexibility analysis.
+
+    Measures how much success rate improves if retiree can
+    reduce spending during market downturns.
+
+    Attributes:
+        base_success_rate: Success rate with fixed spending
+        flexible_success_rate: Success rate with flexible spending
+        improvement: Percentage point improvement
+        avg_spending_ratio: Average actual spending vs target (< 1 if cuts occurred)
+        years_with_cuts: Average number of years with spending cuts
+    """
+
+    base_success_rate: float
+    flexible_success_rate: float
+    improvement: float
+    avg_spending_ratio: float
+    years_with_cuts: float
+
+
+@dataclass(frozen=True)
 class RiskMetrics:
     """
     Comprehensive risk metrics for retirement simulation results.
@@ -33,6 +81,11 @@ class RiskMetrics:
     max_drawdown_median: float
     max_drawdown_worst: float
     probability_of_ruin_by_year: list[float]
+    # New enhanced metrics
+    cvar_95: float = 0.0  # Conditional VaR at 95% confidence
+    cvar_99: float = 0.0  # Conditional VaR at 99% confidence
+    legacy_metrics: LegacyMetrics | None = None
+    spending_flexibility: SpendingFlexibilityResult | None = None
 
 
 def calculate_max_drawdown(path: np.ndarray) -> float:
@@ -140,6 +193,187 @@ def estimate_perfect_withdrawal_rate(
     return sustainable_annual / initial_balance
 
 
+def calculate_cvar(
+    ending_balances: np.ndarray,
+    confidence: float = 0.95,
+) -> float:
+    """
+    Calculate Conditional Value at Risk (CVaR / Expected Shortfall).
+
+    CVaR measures the expected loss in the worst (1-confidence)% of scenarios.
+    It's more informative than VaR because it captures the severity of tail losses,
+    not just whether they exceed a threshold.
+
+    Example: CVaR at 95% confidence tells you the average ending balance
+    in the worst 5% of simulations.
+
+    Args:
+        ending_balances: Array of ending balances from simulation
+        confidence: Confidence level (e.g., 0.95 for 95%)
+
+    Returns:
+        Average ending balance in worst (1-confidence)% of scenarios
+    """
+    if len(ending_balances) == 0:
+        return 0.0
+
+    # VaR is the threshold at the (1-confidence) percentile
+    var_percentile = (1 - confidence) * 100
+    var_threshold = float(np.percentile(ending_balances, var_percentile))
+
+    # CVaR is the average of all values at or below VaR
+    tail_values = ending_balances[ending_balances <= var_threshold]
+
+    if len(tail_values) == 0:
+        return var_threshold
+
+    return float(np.mean(tail_values))
+
+
+def calculate_legacy_metrics(
+    ending_balances: np.ndarray,
+    thresholds: list[float] | None = None,
+) -> LegacyMetrics:
+    """
+    Calculate legacy/bequest probability metrics.
+
+    For retirees who want to leave money to heirs, these metrics
+    show the probability of leaving various amounts.
+
+    Args:
+        ending_balances: Array of ending balances from simulation
+        thresholds: Custom thresholds (default: 100k, 500k, 1M)
+
+    Returns:
+        LegacyMetrics with probabilities and expected values
+    """
+    if thresholds is None:
+        thresholds = [100_000, 500_000, 1_000_000]
+
+    n_sims = len(ending_balances)
+
+    # Probability of leaving various amounts
+    prob_100k = float(np.mean(ending_balances > thresholds[0])) if len(thresholds) > 0 else 0.0
+    prob_500k = float(np.mean(ending_balances > thresholds[1])) if len(thresholds) > 1 else 0.0
+    prob_1m = float(np.mean(ending_balances > thresholds[2])) if len(thresholds) > 2 else 0.0
+
+    # Expected and median legacy (only count positive endings)
+    positive_endings = ending_balances[ending_balances > 0]
+    if len(positive_endings) > 0:
+        expected_legacy = float(np.mean(positive_endings))
+        median_legacy = float(np.median(positive_endings))
+    else:
+        expected_legacy = 0.0
+        median_legacy = 0.0
+
+    # Legacy at risk (10th percentile - conservative estimate)
+    legacy_at_risk = float(np.percentile(ending_balances, 10))
+
+    return LegacyMetrics(
+        prob_leave_100k=prob_100k,
+        prob_leave_500k=prob_500k,
+        prob_leave_1m=prob_1m,
+        expected_legacy=expected_legacy,
+        median_legacy=median_legacy,
+        legacy_at_risk=legacy_at_risk,
+    )
+
+
+def estimate_spending_flexibility_impact(
+    total_paths: np.ndarray,
+    base_success_rate: float,
+    withdrawal_rate: float,
+    reduction_amount: float = 0.10,
+    reduction_trigger: float = 0.15,
+) -> SpendingFlexibilityResult:
+    """
+    Estimate how spending flexibility improves retirement outcomes.
+
+    Many retirees can reduce spending during market downturns.
+    This estimates the improvement in success rate if spending
+    can be reduced when portfolio drops significantly.
+
+    This is a simplified estimate that doesn't re-run the simulation,
+    but uses heuristics based on the path characteristics.
+
+    Args:
+        total_paths: Portfolio value paths (n_sims, n_months+1)
+        base_success_rate: Success rate with fixed spending
+        withdrawal_rate: Annual withdrawal rate
+        reduction_amount: How much spending can be reduced (e.g., 0.10 = 10%)
+        reduction_trigger: Portfolio drop that triggers reduction (e.g., 0.15 = 15%)
+
+    Returns:
+        SpendingFlexibilityResult with estimated improvement
+    """
+    n_sims, n_months_plus_1 = total_paths.shape
+    n_months = n_months_plus_1 - 1
+
+    # Identify simulations that failed
+    failed_sims = total_paths[:, -1] <= 0
+    n_failed = np.sum(failed_sims)
+
+    if n_failed == 0:
+        # No failures - flexibility doesn't help
+        return SpendingFlexibilityResult(
+            base_success_rate=base_success_rate,
+            flexible_success_rate=base_success_rate,
+            improvement=0.0,
+            avg_spending_ratio=1.0,
+            years_with_cuts=0.0,
+        )
+
+    # For failed simulations, estimate how many could be saved
+    # by spending cuts during drawdowns
+
+    # Calculate max drawdown for failed simulations
+    failed_paths = total_paths[failed_sims]
+    saved_count = 0
+    total_years_with_cuts = 0
+    total_spending_ratio = 0.0
+
+    for path in failed_paths:
+        # Find months where portfolio dropped significantly
+        peak = np.maximum.accumulate(path)
+        drawdown = (peak - path) / np.maximum(peak, 1)
+
+        # Count months where cuts would trigger
+        cut_months = np.sum(drawdown > reduction_trigger)
+        years_with_cuts = cut_months / 12
+
+        # Estimate savings from cuts
+        # Each year of 10% cuts saves roughly 10% of annual withdrawal
+        annual_withdrawal_value = path[0] * withdrawal_rate
+        total_saved = years_with_cuts * reduction_amount * annual_withdrawal_value
+
+        # If saved amount > shortfall at end, this simulation could succeed
+        shortfall = abs(path[-1])
+        if total_saved > shortfall * 0.5:  # Conservative: need to save 50% more than shortfall
+            saved_count += 1
+
+        total_years_with_cuts += years_with_cuts
+        total_spending_ratio += 1.0 - (years_with_cuts * reduction_amount / (n_months / 12))
+
+    # Calculate improvement
+    new_successes = saved_count
+    flexible_success_rate = base_success_rate + (new_successes / n_sims)
+    flexible_success_rate = min(flexible_success_rate, 1.0)  # Cap at 100%
+
+    improvement = flexible_success_rate - base_success_rate
+
+    # Average spending ratio and years with cuts (across all sims)
+    avg_spending_ratio = total_spending_ratio / max(n_failed, 1)
+    avg_years_with_cuts = total_years_with_cuts / max(n_failed, 1)
+
+    return SpendingFlexibilityResult(
+        base_success_rate=base_success_rate,
+        flexible_success_rate=flexible_success_rate,
+        improvement=improvement,
+        avg_spending_ratio=avg_spending_ratio,
+        years_with_cuts=avg_years_with_cuts,
+    )
+
+
 def calculate_risk_metrics(
     total_paths: np.ndarray,
     ending_balances: np.ndarray,
@@ -203,6 +437,20 @@ def calculate_risk_metrics(
         ruin_rate = float(np.mean(balances_at_year <= 0))
         prob_ruin_by_year.append(ruin_rate)
 
+    # Calculate CVaR (Expected Shortfall)
+    cvar_95 = calculate_cvar(ending_balances, confidence=0.95)
+    cvar_99 = calculate_cvar(ending_balances, confidence=0.99)
+
+    # Calculate legacy metrics
+    legacy = calculate_legacy_metrics(ending_balances)
+
+    # Calculate spending flexibility impact (simplified estimate)
+    flexibility = estimate_spending_flexibility_impact(
+        total_paths=total_paths,
+        base_success_rate=success_rate,
+        withdrawal_rate=annual_withdrawal / initial_balance if initial_balance > 0 else 0.04,
+    )
+
     return RiskMetrics(
         success_rate=success_rate,
         perfect_withdrawal_rate=pwr,
@@ -213,4 +461,8 @@ def calculate_risk_metrics(
         max_drawdown_median=max_drawdown_median,
         max_drawdown_worst=max_drawdown_worst,
         probability_of_ruin_by_year=prob_ruin_by_year,
+        cvar_95=cvar_95,
+        cvar_99=cvar_99,
+        legacy_metrics=legacy,
+        spending_flexibility=flexibility,
     )

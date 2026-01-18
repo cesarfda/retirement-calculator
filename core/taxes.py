@@ -44,6 +44,7 @@ class WithdrawalTaxResult:
     capital_gains_tax: float
     total_tax: float
     net_withdrawal: float
+    niit: float = 0.0  # Net Investment Income Tax
 
     @property
     def effective_rate(self) -> float:
@@ -219,7 +220,16 @@ def calculate_withdrawal_taxes(
     # Roth withdrawals are tax-free (assuming qualified)
     # No tax on withdrawal_roth
 
-    total_tax = federal_tax + capital_gains_tax
+    # Calculate NIIT on investment income (capital gains from taxable)
+    # MAGI for NIIT purposes includes the 401k withdrawal and gains
+    magi = ordinary_income + taxable_gains
+    niit = calculate_niit(
+        investment_income=taxable_gains,
+        magi=magi,
+        filing_status=filing_status,
+    )
+
+    total_tax = federal_tax + capital_gains_tax + niit
     net_withdrawal = gross_withdrawal - total_tax
 
     return WithdrawalTaxResult(
@@ -228,6 +238,7 @@ def calculate_withdrawal_taxes(
         capital_gains_tax=capital_gains_tax,
         total_tax=total_tax,
         net_withdrawal=net_withdrawal,
+        niit=niit,
     )
 
 
@@ -255,6 +266,52 @@ def estimate_marginal_rate(
 
     # If income exceeds all brackets, return top rate
     return brackets[-1][1]
+
+
+def calculate_niit(
+    investment_income: float,
+    magi: float,
+    filing_status: FilingStatus = FilingStatus.SINGLE,
+) -> float:
+    """
+    Calculate Net Investment Income Tax (NIIT).
+
+    The NIIT is a 3.8% surtax on investment income for high earners,
+    enacted as part of the Affordable Care Act.
+
+    Investment income includes:
+    - Capital gains (including from taxable account withdrawals)
+    - Dividends
+    - Interest (except municipal bonds)
+    - Rental income
+    - Passive business income
+
+    Args:
+        investment_income: Total net investment income
+        magi: Modified Adjusted Gross Income
+        filing_status: Tax filing status
+
+    Returns:
+        NIIT amount (3.8% of lesser of investment income or excess MAGI)
+    """
+    if investment_income <= 0:
+        return 0.0
+
+    # MAGI thresholds for NIIT
+    if filing_status == FilingStatus.MARRIED_FILING_JOINTLY:
+        threshold = 250_000
+    else:
+        threshold = 200_000  # Single, head of household, etc.
+
+    excess_magi = max(0, magi - threshold)
+
+    if excess_magi <= 0:
+        return 0.0
+
+    # NIIT applies to lesser of: investment income or excess MAGI
+    taxable_amount = min(investment_income, excess_magi)
+
+    return taxable_amount * 0.038
 
 
 def calculate_bracket_room(

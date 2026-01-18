@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -11,8 +12,54 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from scipy import stats
 
 from core.exceptions import DataFetchError
+
+
+@dataclass(frozen=True)
+class ValuationAdjustment:
+    """
+    Configuration for valuation-based expected return adjustment.
+
+    When market valuations (CAPE/Shiller P/E) are elevated above historical
+    norms, future returns tend to be lower. This adjustment reduces expected
+    equity returns proportionally to the valuation premium.
+
+    Attributes:
+        enabled: Whether to apply valuation adjustment
+        current_cape: Current Shiller P/E ratio (CAPE)
+        historical_cape_median: Long-term median CAPE (typically ~16)
+        adjustment_factor: How much to adjust (0=none, 1=full adjustment)
+        max_annual_drag: Maximum annual return reduction (cap extreme adjustments)
+    """
+
+    enabled: bool = False
+    current_cape: float = 30.0  # Current elevated valuations
+    historical_cape_median: float = 16.0
+    adjustment_factor: float = 0.5  # 50% adjustment (conservative)
+    max_annual_drag: float = 0.03  # Cap at 3% annual reduction
+
+    def calculate_monthly_drag(self) -> float:
+        """
+        Calculate monthly return drag based on valuation premium.
+
+        Uses the relationship: higher CAPE -> lower future returns.
+        Research suggests ~2% lower returns per 100% CAPE premium.
+        """
+        if not self.enabled or self.historical_cape_median <= 0:
+            return 0.0
+
+        cape_ratio = self.current_cape / self.historical_cape_median
+        if cape_ratio <= 1.0:
+            # At or below historical median - no drag
+            return 0.0
+
+        # Calculate drag: ~2% per 100% overvaluation, scaled by adjustment_factor
+        annual_drag = (cape_ratio - 1) * 0.02 * self.adjustment_factor
+        annual_drag = min(annual_drag, self.max_annual_drag)
+
+        return annual_drag / 12
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -248,6 +295,121 @@ def sample_returns(
     sampled = sampled[:, :n_months, :]
 
     return sampled
+
+
+def sample_returns_student_t(
+    returns: pd.DataFrame,
+    n_months: int,
+    n_simulations: int,
+    degrees_of_freedom: int = 5,
+    seed: int | None = None,
+) -> np.ndarray:
+    """
+    Sample returns using Student-t distribution for fatter tails.
+
+    The Student-t distribution better captures the fat-tailed nature of
+    financial returns compared to the normal distribution. Lower degrees
+    of freedom = fatter tails (more extreme events).
+
+    Typical values:
+    - df=30: Nearly normal distribution
+    - df=5-10: Moderate fat tails (commonly used for equities)
+    - df=3-4: Very fat tails (for stress testing)
+
+    Args:
+        returns: Historical returns DataFrame
+        n_months: Number of months to simulate
+        n_simulations: Number of simulation paths
+        degrees_of_freedom: Student-t degrees of freedom (lower = fatter tails)
+        seed: Random seed for reproducibility
+
+    Returns:
+        3D array of shape (n_simulations, n_months, n_assets)
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    logger.debug(
+        f"Sampling Student-t returns: {n_simulations} sims, {n_months} months, df={degrees_of_freedom}"
+    )
+
+    n_assets = returns.shape[1]
+    mean = returns.mean().values
+    cov = returns.cov().values
+
+    # Generate correlated Student-t samples
+    # Method: Transform multivariate normal by chi-squared scaling
+    sampled = np.zeros((n_simulations, n_months, n_assets))
+
+    # Cholesky decomposition for correlation structure
+    try:
+        chol = np.linalg.cholesky(cov)
+    except np.linalg.LinAlgError:
+        # If covariance matrix is not positive definite, use eigendecomposition
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        eigvals = np.maximum(eigvals, 1e-10)  # Ensure positive
+        chol = eigvecs @ np.diag(np.sqrt(eigvals))
+
+    for sim in range(n_simulations):
+        # Generate standard normal samples
+        z = np.random.standard_normal((n_months, n_assets))
+
+        # Generate chi-squared samples for t-distribution scaling
+        chi2 = np.random.chisquare(degrees_of_freedom, size=n_months)
+
+        # Scale factor for Student-t
+        scale = np.sqrt(degrees_of_freedom / chi2)
+
+        # Transform to correlated Student-t
+        for month in range(n_months):
+            # Correlated normal
+            correlated_normal = z[month] @ chol.T
+            # Scale to Student-t
+            sampled[sim, month, :] = mean + correlated_normal * scale[month]
+
+    return sampled
+
+
+def apply_valuation_adjustment(
+    sampled_returns: np.ndarray,
+    adjustment: ValuationAdjustment,
+    equity_columns: list[int] | None = None,
+) -> np.ndarray:
+    """
+    Apply valuation-based return adjustment to sampled returns.
+
+    Reduces expected equity returns when valuations are elevated.
+    Only affects equity asset classes, not bonds.
+
+    Args:
+        sampled_returns: Sampled returns array (n_sims, n_months, n_assets)
+        adjustment: ValuationAdjustment configuration
+        equity_columns: Indices of equity columns (default: first 2)
+
+    Returns:
+        Adjusted returns array
+    """
+    if not adjustment.enabled:
+        return sampled_returns
+
+    monthly_drag = adjustment.calculate_monthly_drag()
+    if monthly_drag <= 0:
+        return sampled_returns
+
+    if equity_columns is None:
+        # Assume first 2 columns are equities (US, International)
+        equity_columns = [0, 1]
+
+    adjusted = sampled_returns.copy()
+    for col in equity_columns:
+        if col < adjusted.shape[2]:
+            adjusted[:, :, col] -= monthly_drag
+
+    logger.info(
+        f"Applied valuation adjustment: {monthly_drag * 12:.2%} annual drag on equities"
+    )
+
+    return adjusted
 
 
 def get_historical_summary(returns: pd.DataFrame) -> dict:
