@@ -110,13 +110,18 @@ with st.sidebar:
         key="contrib_taxable",
         help_text="Monthly contribution in dollars.",
     )
+    st.subheader("Soft retirement contribution choices")
+    continue_401k = st.checkbox("Continue 401k contributions", value=True)
+    continue_roth = st.checkbox("Continue Roth IRA contributions", value=True)
+    continue_taxable = st.checkbox("Continue after-tax contributions", value=True)
     soft_contribution_factor = st.slider(
         "Contributions after soft retirement",
         min_value=0.0,
         max_value=1.0,
         value=0.5,
         step=0.05,
-        help="Scale contributions after the soft retirement age (1.0 keeps contributions unchanged).",
+        help="Scale selected contributions after the soft retirement age "
+        "(1.0 keeps contributions unchanged).",
     )
 
     st.header("Employer match")
@@ -341,6 +346,11 @@ result = run_simulation(
     retirement_months=retirement_months,
     soft_retirement_months=soft_retirement_months,
     soft_contribution_factor=soft_contribution_factor,
+    soft_contribution_factors={
+        "401k": soft_contribution_factor if continue_401k else 0.0,
+        "roth": soft_contribution_factor if continue_roth else 0.0,
+        "taxable": soft_contribution_factor if continue_taxable else 0.0,
+    },
     withdrawal_rate=withdrawal_rate,
     expense_ratio=expense_ratio,
     guardrails=guardrails,
@@ -723,7 +733,15 @@ with tabs[4]:
             "401k": format_currency(contrib_401k),
             "Roth IRA": format_currency(contrib_roth),
             "After-tax": format_currency(contrib_taxable),
-            "Post-soft retirement factor": f"{soft_contribution_factor:.0%}",
+            "Post-soft retirement contributions": (
+                f"401k: {soft_contribution_factor:.0%}" if continue_401k else "401k: 0%"
+            )
+            + (f" | Roth IRA: {soft_contribution_factor:.0%}" if continue_roth else " | Roth IRA: 0%")
+            + (
+                f" | After-tax: {soft_contribution_factor:.0%}"
+                if continue_taxable
+                else " | After-tax: 0%"
+            ),
             "Employer match": f"{match_rate:.0%} up to {format_currency(match_cap)}",
         }
     )

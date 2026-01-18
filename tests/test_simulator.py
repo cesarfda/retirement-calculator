@@ -62,6 +62,16 @@ class TestMonthlyContributions:
         # Match settings unchanged
         assert scaled.employer_match_rate == 0.5
 
+    def test_scaled_by_factors(self, default_contributions):
+        """Scaling by factors adjusts contributions per account."""
+        scaled = default_contributions.scaled_by_factors(
+            {"401k": 0.5, "roth": 1.0, "taxable": 0.0}
+        )
+        assert scaled.contrib_401k == 450
+        assert scaled.contrib_roth == 400
+        assert scaled.contrib_taxable == 0
+        assert scaled.employer_match_rate == 0.5
+
 
 class TestGuardrails:
     """Tests for Guardrails withdrawal strategy."""

@@ -72,6 +72,16 @@ class MonthlyContributions:
             employer_match_cap=self.employer_match_cap,
         )
 
+    def scaled_by_factors(self, factors: dict[str, float]) -> "MonthlyContributions":
+        """Return contributions scaled by per-account factors."""
+        return MonthlyContributions(
+            contrib_401k=self.contrib_401k * factors.get("401k", 1.0),
+            contrib_roth=self.contrib_roth * factors.get("roth", 1.0),
+            contrib_taxable=self.contrib_taxable * factors.get("taxable", 1.0),
+            employer_match_rate=self.employer_match_rate,
+            employer_match_cap=self.employer_match_cap,
+        )
+
 
 @dataclass(frozen=True)
 class Guardrails:
@@ -137,6 +147,7 @@ class SimulationConfig:
     retirement_months: int | None = None
     soft_retirement_months: int | None = None
     soft_contribution_factor: float = 1.0
+    soft_contribution_factors: dict[str, float] | None = None
     withdrawal_rate: float = 0.04
     expense_ratio: float = 0.001  # Default 0.1% annual expense ratio
     guardrails: Guardrails | None = None
@@ -253,6 +264,7 @@ def run_simulation(
     retirement_months: int | None = None,
     soft_retirement_months: int | None = None,
     soft_contribution_factor: float = 1.0,
+    soft_contribution_factors: dict[str, float] | None = None,
     withdrawal_rate: float = 0.04,
     expense_ratio: float = 0.001,
     guardrails: Guardrails | None = None,
@@ -272,6 +284,7 @@ def run_simulation(
         retirement_months: Month when retirement begins (None = never retire)
         soft_retirement_months: Month when soft retirement begins (reduced contributions)
         soft_contribution_factor: Contribution multiplier after soft retirement
+        soft_contribution_factors: Optional per-account contribution multipliers
         withdrawal_rate: Annual withdrawal rate in retirement (e.g., 0.04 = 4%)
         expense_ratio: Annual fund expense ratio (e.g., 0.001 = 0.1%)
         guardrails: Optional guardrails withdrawal strategy
@@ -293,6 +306,7 @@ def run_simulation(
         retirement_months=retirement_months,
         soft_retirement_months=soft_retirement_months,
         soft_contribution_factor=soft_contribution_factor,
+        soft_contribution_factors=soft_contribution_factors,
         withdrawal_rate=withdrawal_rate,
         expense_ratio=expense_ratio,
         guardrails=guardrails,
@@ -358,9 +372,14 @@ def run_simulation(
 
             # Determine contribution amount
             if is_soft_retired:
-                effective_contributions = monthly_contributions.scaled(
-                    soft_contribution_factor
-                )
+                if soft_contribution_factors is not None:
+                    effective_contributions = monthly_contributions.scaled_by_factors(
+                        soft_contribution_factors
+                    )
+                else:
+                    effective_contributions = monthly_contributions.scaled(
+                        soft_contribution_factor
+                    )
             else:
                 effective_contributions = monthly_contributions
 
